@@ -1,8 +1,32 @@
 # ADR-001: Hostname Resolution Strategy for streamy / mac-mini
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-002 (2026-08-16)
 - **Date:** 2026-08-15
 - **Supersedes:** nothing (first ADR in this repo)
+
+## Superseded (2026-08-16)
+
+The `/etc/resolver` decision below (Section 2) was **never applied** — it is
+superseded before installation, not after a failed rollout. The reason is not
+a flaw in the mechanism; it is that the underlying collision this ADR was
+built to work around turned out to be an artifact of the **NordVPN app's**
+NordLynx tunnel extension, not of NordVPN itself. That extension installs a
+resolver at `100.64.0.2`, inside the CGNAT range Tailscale claims, which is
+what black-holes DNS whenever both are up (see Context, below, for the
+mechanism). NordVPN's own IKEv2 servers push a resolver
+(`103.86.96.100`/`103.86.99.100`) and a tunnel address (`10.6.0.41` observed)
+that sit entirely outside `100.64.0.0/10` — so running NordVPN over a native
+IKEv2 configuration profile instead of the app removes the collision at its
+source. Measured: with Tailscale up and NordVPN IKEv2 up simultaneously,
+bare tailnet names resolve correctly, and disconnecting/reconnecting Nord
+makes no difference either way. See **[ADR-002](adr-002-nordvpn-ikev2.md)**
+for the decision, the full evidence, and the tradeoffs of the new approach.
+The rest of this document — in particular the corrected root-cause mechanism
+(nameserver selection driven by primary-service election via the default
+route, not by resolver `order` values, and specificity/longest-suffix-match
+governing domain-scoped resolvers) — remains accurate and is why the
+app-based path fails while the IKEv2 path does not; it is retained below for
+that reason, not as an active decision.
 
 ## 1. Context
 
@@ -28,9 +52,18 @@ which is the **route gateway** for Nord's tunnel — visible in `netstat -rn`
 as `default 10.5.0.2 UGScg utun11` — not a nameserver; the two addresses
 were previously conflated in this document and that conflation is now
 resolved (see Risks, item 5). Tailscale MagicDNS installs a resolver at
-`100.100.100.100` on `utun17` with `order 101600` (a lower order value wins
-in macOS's `scutil` resolver selection). Because `104800 > 101600`, **Nord's
-resolver outranks MagicDNS** whenever NordVPN is up.
+`100.100.100.100` on `utun17` with `order 101600`. **[Superseded
+explanation — retained for the record, do not rely on it:]** this document
+originally reasoned that "a lower order value wins" and that `104800 >
+101600` is why Nord's resolver outranks MagicDNS. That comparison is wrong:
+those two order values never compete. The real reason Nord's resolver wins
+is macOS **primary-service election** — a service is not elected primary
+unless it holds a default route (`ip_plugin.c`), NordVPN installs one and
+Tailscale does not — and, for domain-scoped resolvers, longest-suffix
+specificity is evaluated before `order` (`compareDomain()`,
+`BetterMatchForName()`). Evidence: bead `dns-config-c15.3`, comment
+2026-08-16 00:04. The observable outcome — **Nord's resolver is used
+whenever NordVPN's app is up** — is unchanged.
 
 Critically, Nord's resolver **does** carry the search domain
 `tailXXXX.ts.net` — the suffix is not missing. macOS appends the suffix as
