@@ -31,7 +31,7 @@ mkdir -p "$OUTDIR" 2>/dev/null || { echo "Warning: cannot create $OUTDIR" >&2; O
 
 # One line of state. Every probe is bounded so a dead network cannot stall us.
 sample() {
-    local t nord ts_state claimed route_if dns_gen dns_streamy ping_streamy
+    local t nord ts_state claimed dns_gen dns_streamy ping_streamy
 
     t="$(date '+%H:%M:%S' 2>/dev/null || echo '??:??:??')"
 
@@ -53,9 +53,6 @@ sample() {
 
     if netstat -rn -f inet 2>/dev/null | grep -q '100\.64/10'; then claimed="yes"; else claimed="no"; fi
 
-    route_if="$(route -n get 100.64.0.2 2>/dev/null | awk '/interface:/{print $2}')"
-    [ -n "$route_if" ] || route_if="none"
-
     dns_gen="$(timeout 5 dscacheutil -q host -a name apple.com 2>/dev/null | awk '/ip_address/{print $2; exit}')"
     [ -n "$dns_gen" ] || dns_gen="FAIL"
 
@@ -66,18 +63,31 @@ sample() {
 
     # Reaching the LAN address bypasses both the tailnet and any resolver, so
     # it separates "DNS is broken" from "the network path is gone".
-    local ping_lan
+    local ping_lan web
     if timeout 3 ping -c1 -W1000 192.0.2.4 >/dev/null 2>&1; then ping_lan="ok"; else ping_lan="FAIL"; fi
 
-    printf '%s  nord=%-11s ts=%-12s claim=%-3s rt=%-7s inet-dns=%-15s streamy-dns=%-15s ts-ping=%-4s lan-ping=%s\n' \
-        "$t" "$nord" "$ts_state" "$claimed" "$route_if" "$dns_gen" "$dns_streamy" "$ping_streamy" "$ping_lan"
+    # DNS resolving and ICMP working do NOT mean the machine is usable — with
+    # Nord up the browser fails while both of those still report green. Only a
+    # completed TCP/TLS fetch proves real connectivity, so it decides the
+    # verdict; never call a state "working" without this column passing.
+    web="$(timeout 8 curl -s -o /dev/null -w '%{http_code}' --max-time 7 https://example.com 2>/dev/null)"
+    case "$web" in
+        2*|3*) web="ok($web)" ;;
+        "")    web="FAIL" ;;
+        *)     web="FAIL($web)" ;;
+    esac
+
+    printf '%s  nord=%-11s ts=%-11s claim=%-3s inet-dns=%-15s streamy-dns=%-15s ts-ping=%-4s lan-ping=%-4s WEB=%s\n' \
+        "$t" "$nord" "$ts_state" "$claimed" "$dns_gen" "$dns_streamy" "$ping_streamy" "$ping_lan" "$web"
 }
 
 {
     echo "=== dns-watch: $LABEL ==="
     echo "started: $(date 2>/dev/null || echo unknown)  duration: ${DURATION}s"
     echo "columns: nord=NordVPN iface  ts=tailscale state  claim=100.64/10 claimed"
-    echo "         rt=where 100.64.0.2 routes  inet-dns/streamy-dns=resolved addr or FAIL"
+    echo "         inet-dns/streamy-dns=resolved addr or FAIL  ts-ping/lan-ping=ICMP"
+    echo "         WEB=real HTTPS fetch — the ONLY column that proves usability."
+    echo "         DNS+ICMP can all read green while the browser is dead; trust WEB."
     echo ""
 } | tee "$OUTFILE"
 
