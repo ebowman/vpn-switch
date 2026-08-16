@@ -4,3 +4,8 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# NordVPN IKEv2 profile generator: defensive, since the default output dir
+# (Library/Application Support/vpn-switch) is outside the repo anyway.
+*.mobileconfig
+config/nord-ikev2/*.env
