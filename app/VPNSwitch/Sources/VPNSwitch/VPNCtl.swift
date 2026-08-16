@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Result of running vpn-ctl.sh: exit code plus captured output.
 struct VPNCtlResult {
@@ -26,8 +29,46 @@ enum VPNCtlError: Error {
 }
 
 /// Resolves and runs bin/vpn-ctl.sh.
+///
+/// PROCESS-GROUP TIMEOUT NOTE (dns-config-qsk.6 fold-in from qsk.5 review):
+/// Foundation.Process offers no supported hook to pass posix_spawn attribute
+/// flags (e.g. POSIX_SPAWN_SETSID) to the child it launches, so a
+/// Process.terminate()/SIGTERM only ever reaches the direct child
+/// (vpn-ctl.sh itself); a grandchild the script spawns and detaches (or one
+/// left behind if bash itself doesn't forward the signal) can survive past
+/// the 60s timeout. To close that gap, `run` below bypasses Process
+/// entirely and calls posix_spawn(2) directly with
+/// POSIX_SPAWN_SETSID set, which makes the child a new session/process
+/// group leader. On timeout we then signal the whole group with
+/// kill(-pid, SIGTERM), wait briefly, and if it's still alive escalate to
+/// kill(-pid, SIGKILL) -- so a hung grandchild cannot outlive the timeout.
 enum VPNCtl {
     static let userDefaultsKey = "vpnCtlPath"
+
+    /// Registry of currently-spawned child pids (each its own process-group
+    /// leader per POSIX_SPAWN_SETSID below), so the app's Quit path can
+    /// signal any in-flight run's whole group even though `run` is
+    /// synchronous and Task cancellation cannot interrupt it. Without this,
+    /// quitting the app while a poll/toggle is blocked inside a slow or
+    /// hung vpn-ctl.sh would leave that child (and any grandchildren) as
+    /// orphans reparented to launchd.
+    private static let liveGroups = ThreadSafeBox(Set<pid_t>())
+
+    /// Sends SIGTERM (then, after a short grace period, SIGKILL) to every
+    /// process group currently registered as in-flight. Called from the
+    /// Quit menu item before NSApplication.terminate so no child outlives
+    /// the app. Safe to call with nothing in-flight (no-op).
+    static func terminateAllInFlight() {
+        let groups = Array(liveGroups.value)
+        guard !groups.isEmpty else { return }
+        for pid in groups {
+            kill(-pid, SIGTERM)
+        }
+        usleep(300_000)
+        for pid in groups {
+            kill(-pid, SIGKILL)
+        }
+    }
 
     /// Default install location once packaged (qsk.7).
     static let defaultPath = "/usr/local/bin/vpn-ctl.sh"
@@ -71,75 +112,183 @@ enum VPNCtl {
     /// this function itself is synchronous/blocking and MUST be called from
     /// a background context (Task.detached / a background DispatchQueue),
     /// never from the main thread. Hard timeout: 60s, after which the
-    /// process is terminated and `timedOut=true` is returned.
+    /// child's whole process group is signaled (SIGTERM, then SIGKILL after
+    /// a grace period) and `timedOut=true` is returned.
     static func run(_ args: [String], timeout: TimeInterval = 60) -> Result<VPNCtlResult, VPNCtlError> {
         guard let path = resolvedPath() else {
             return .failure(.scriptNotFound(pathForDisplay()))
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = args
+        var stdoutFDs: [Int32] = [0, 0]
+        var stderrFDs: [Int32] = [0, 0]
+        guard pipe(&stdoutFDs) == 0, pipe(&stderrFDs) == 0 else {
+            return .failure(.scriptNotFound(path))
+        }
+        let stdoutReadFD = stdoutFDs[0]
+        let stdoutWriteFD = stdoutFDs[1]
+        let stderrReadFD = stderrFDs[0]
+        let stderrWriteFD = stderrFDs[1]
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        // Child's stdout/stderr -> the write ends of our pipes.
+        posix_spawn_file_actions_adddup2(&fileActions, stdoutWriteFD, 1)
+        posix_spawn_file_actions_adddup2(&fileActions, stderrWriteFD, 2)
+        // Close all four pipe fds in the child after the dup2s above -- the
+        // dup'd targets (1, 2) stay open; the originals must not leak into
+        // the child (in particular, an open read-end fd would let a
+        // grandchild inherit and hold the pipe open after we've killed the
+        // group we know about).
+        posix_spawn_file_actions_addclose(&fileActions, stdoutReadFD)
+        posix_spawn_file_actions_addclose(&fileActions, stdoutWriteFD)
+        posix_spawn_file_actions_addclose(&fileActions, stderrReadFD)
+        posix_spawn_file_actions_addclose(&fileActions, stderrWriteFD)
 
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        // POSIX_SPAWN_SETSID (0x0400): child becomes a new session and
+        // process-group leader, so kill(-pid, sig) below reaches it and any
+        // grandchildren it spawns (they inherit its new pgid unless they
+        // explicitly change it themselves).
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+
+        let argv: [String] = [path] + args
+        var cArgs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
+        cArgs.append(nil)
+
+        var envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { key, value in
+            strdup("\(key)=\(value)")
+        }
+        envp.append(nil)
+
+        var pid: pid_t = 0
+        let spawnResult = posix_spawn(&pid, path, &fileActions, &attr, &cArgs, &envp)
+
+        posix_spawn_file_actions_destroy(&fileActions)
+        posix_spawnattr_destroy(&attr)
+        cArgs.forEach { if let p = $0 { free(p) } }
+        envp.forEach { if let p = $0 { free(p) } }
+
+        // Parent no longer needs the write ends once the child has them.
+        close(stdoutWriteFD)
+        close(stderrWriteFD)
+
+        guard spawnResult == 0 else {
+            close(stdoutReadFD)
+            close(stderrReadFD)
+            return .failure(.scriptNotFound(path))
+        }
+
+        registerLiveGroup(pid)
+        defer { unregisterLiveGroup(pid) }
+
+        // Read both pipes to completion on background threads so a full
+        // pipe buffer can never deadlock the process (matches the previous
+        // Process-based readabilityHandler behavior).
         let stdoutData = ThreadSafeBox(Data())
         let stderrData = ThreadSafeBox(Data())
+        let stdoutReadDone = DispatchSemaphore(value: 0)
+        let stderrReadDone = DispatchSemaphore(value: 0)
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            if !chunk.isEmpty { stdoutData.append(chunk) }
+        DispatchQueue.global(qos: .utility).async {
+            stdoutData.set(readAllAndClose(fd: stdoutReadFD))
+            stdoutReadDone.signal()
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            if !chunk.isEmpty { stderrData.append(chunk) }
-        }
-
-        do {
-            try process.run()
-        } catch {
-            return .failure(.scriptNotFound(path))
+        DispatchQueue.global(qos: .utility).async {
+            stderrData.set(readAllAndClose(fd: stderrReadFD))
+            stderrReadDone.signal()
         }
 
         let deadline = Date().addingTimeInterval(timeout)
         var timedOut = false
-        while process.isRunning {
+        var exitStatus: Int32 = 0
+        while true {
+            var status: Int32 = 0
+            let waited = waitpid(pid, &status, WNOHANG)
+            if waited == pid {
+                exitStatus = status
+                break
+            }
             if Date() > deadline {
                 timedOut = true
-                process.terminate()
-                // Give it a moment to die; force-kill via SIGKILL is not
-                // available through Process directly, terminate() sends
-                // SIGTERM which vpn-ctl.sh (a plain bash script) will honor.
-                usleep(200_000)
                 break
             }
             usleep(50_000)
         }
-        process.waitUntilExit()
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        // Drain any remaining buffered data synchronously.
-        let remainingOut = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        if !remainingOut.isEmpty { stdoutData.append(remainingOut) }
-        let remainingErr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        if !remainingErr.isEmpty { stderrData.append(remainingErr) }
+        if timedOut {
+            // Signal the whole process group (negative pid), not just the
+            // direct child, so a detached grandchild dies too.
+            kill(-pid, SIGTERM)
+            let termDeadline = Date().addingTimeInterval(2)
+            var reaped = false
+            while Date() < termDeadline {
+                var status: Int32 = 0
+                if waitpid(pid, &status, WNOHANG) == pid {
+                    reaped = true
+                    break
+                }
+                usleep(50_000)
+            }
+            if !reaped {
+                kill(-pid, SIGKILL)
+                var status: Int32 = 0
+                _ = waitpid(pid, &status, 0)
+            }
+        }
+
+        // Pipes must complete (the child, and its group, are dead/dying by
+        // now, so the write ends will hit EOF).
+        stdoutReadDone.wait()
+        stderrReadDone.wait()
 
         let result = VPNCtlResult(
-            exitCode: timedOut ? 1 : process.terminationStatus,
+            exitCode: timedOut ? 1 : (WIFEXITED(exitStatus) ? WEXITSTATUS(exitStatus) : 1),
             stdout: String(data: stdoutData.value, encoding: .utf8) ?? "",
             stderr: String(data: stderrData.value, encoding: .utf8) ?? "",
             timedOut: timedOut
         )
         return .success(result)
     }
+
+    private static func registerLiveGroup(_ pid: pid_t) {
+        liveGroups.mutate { $0.insert(pid) }
+    }
+
+    private static func unregisterLiveGroup(_ pid: pid_t) {
+        liveGroups.mutate { $0.remove(pid) }
+    }
+
+    /// Reads a file descriptor to EOF and closes it. Runs on a background
+    /// DispatchQueue -- blocking read() here is fine, it never touches the
+    /// main thread.
+    private static func readAllAndClose(fd: Int32) -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { ptr -> Int in
+                read(fd, ptr.baseAddress, ptr.count)
+            }
+            if n <= 0 { break }
+            data.append(buffer, count: n)
+        }
+        close(fd)
+        return data
+    }
 }
 
-/// Minimal thread-safe mutable box for accumulating pipe data from
-/// readabilityHandler callbacks (which fire on a background queue).
+/// WIFEXITED/WEXITSTATUS are C macros not imported into Swift; reimplement
+/// per the standard <sys/wait.h> bit layout (status is a 16-bit value: low
+/// byte encodes signal/exited-flag, next byte the exit code).
+private func WIFEXITED(_ status: Int32) -> Bool {
+    (status & 0x7f) == 0
+}
+private func WEXITSTATUS(_ status: Int32) -> Int32 {
+    (status >> 8) & 0xff
+}
+
+/// Minimal thread-safe mutable box for accumulating pipe data read on a
+/// background queue.
 final class ThreadSafeBox<T>: @unchecked Sendable {
     private var _value: T
     private let lock = NSLock()
@@ -152,9 +301,21 @@ final class ThreadSafeBox<T>: @unchecked Sendable {
         return _value
     }
 
+    func set(_ newValue: T) {
+        lock.lock()
+        _value = newValue
+        lock.unlock()
+    }
+
     func append(_ data: Data) where T == Data {
         lock.lock()
         _value.append(data)
+        lock.unlock()
+    }
+
+    func mutate(_ body: (inout T) -> Void) {
+        lock.lock()
+        body(&_value)
         lock.unlock()
     }
 }

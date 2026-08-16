@@ -12,6 +12,19 @@ import Foundation
 ///   error/unknown     -> "exclamationmark.triangle"                (unknown/error state,
 ///                                                                    e.g. app-tunnel/unrecognized)
 enum MenuIcon {
+    /// True for the dns-config-qsk.6 ERROR state specifically: nord=app or
+    /// nord=app+ikev2 (the NordVPN app's own tunnel colliding with
+    /// Tailscale's 100.64/10 range). Distinct from the broader
+    /// "errorish"/unknown handling in `symbolName` below, which also covers
+    /// plain Unknown/unrecognized tokens that are not this particular
+    /// danger condition.
+    static func isErrorState(_ status: VPNStatus) -> Bool {
+        switch status.nord {
+        case .app, .appPlusIkev2: return true
+        default: return false
+        }
+    }
+
     static func symbolName(for status: VPNStatus) -> String {
         // Error/unknown takes priority: app tunnel, unknown, or unrecognized
         // tokens on either side mean the two-state grid below doesn't apply.

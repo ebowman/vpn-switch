@@ -27,7 +27,45 @@ enum SelfTest {
         print("\n--- final status ---")
         report(VPNCtl.run(["status"]), label: "status")
 
+        print("\n--- canned parser cases (dns-config-qsk.6) ---")
+        cannedCase("nord=app ts=Running web=ok streamy=1.2.3.4")
+        cannedCase("nord=app+ikev2 ts=Stopped web=fail streamy=fail")
+        cannedCase("nord=up ts=NeedsLogin web=ok streamy=1.2.3.4")
+        cannedCase("nord=up ts=Starting web=fail streamy=fail")
+        cannedCase("nord=up ts=Running web=fail streamy=1.2.3.4")
+        cannedCase("nord=unknown ts=unrecognizedtoken web=fail streamy=fail")
+
         exit(0)
+    }
+
+    /// Feeds a canned status line through the same VPNStatus.parse /
+    /// MenuIcon.symbolName / label rendering the live UI uses, and prints
+    /// the resulting strings -- used to exercise the app-tunnel error state
+    /// and Tailscale NeedsLogin rendering without needing to actually
+    /// disconnect NordVPN's IKEv2 profile or drive a real login flow.
+    private static func cannedCase(_ line: String) {
+        let parsed = VPNStatus.parse(line)
+        let isAppTunnelError = MenuIcon.isErrorState(parsed)
+        let headerNord = isAppTunnelError ? "⚠︎ NordVPN: \(parsed.nord.label)" : "NordVPN: \(parsed.nord.label)"
+        let headerTs = "Tailscale: \(parsed.ts.label)"
+        let webWarning = (parsed.web == "fail" && parsed.nord.isOn && parsed.ts.isOn)
+            ? "⚠ Internet check failed"
+            : nil
+        let needsLoginMenuItem = (parsed.ts == .needsLogin) ? "Open Tailscale… (menu item present)" : nil
+
+        print("input:  \(line)")
+        print("  \(headerNord)")
+        print("  \(headerTs)")
+        if isAppTunnelError {
+            print("  NordVPN app tunnel detected — 100.64.0.2 collides with Tailscale; disconnect the NordVPN app and use the IKEv2 profile")
+        }
+        if let webWarning {
+            print("  \(webWarning)")
+        }
+        if let needsLoginMenuItem {
+            print("  \(needsLoginMenuItem)")
+        }
+        print("  icon: \(MenuIcon.symbolName(for: parsed))")
     }
 
     private static func report(_ outcome: Result<VPNCtlResult, VPNCtlError>, label: String) {
