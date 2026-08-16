@@ -21,6 +21,18 @@ if ! SCRIPT_DIR="$(cd "${SCRIPT_PARENT}" && pwd)"; then
     exit 1
 fi
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Load the shared NordVPN mode detector (ikev2 vs app vs app+ikev2 vs
+# absent). Degrade to "unknown" rather than aborting if it is missing.
+NORD_DETECT_LIB="${REPO_ROOT}/lib/nord-detect.sh"
+if [ -f "${NORD_DETECT_LIB}" ]; then
+    # shellcheck source=lib/nord-detect.sh
+    . "${NORD_DETECT_LIB}"
+    NORD_DETECT_AVAILABLE=1
+else
+    NORD_DETECT_AVAILABLE=0
+fi
+
 SNAPSHOT_DIR="${REPO_ROOT}/snapshots"
 OUTFILE="${SNAPSHOT_DIR}/${LABEL}.txt"
 SNAPSHOT_WRITE_OK=1
@@ -98,7 +110,21 @@ build_report() {
     echo
 
     echo "=== tunnels ==="
-    run_or_fail bash -c "ifconfig | grep -B1 'inet 10\.\|inet 100\.'"
+    # Prefix each matching 'inet' line with its owning interface name, so
+    # both Tailscale/NordVPN-app utuns (10.x/100.x) and the NordVPN IKEv2
+    # profile's ipsec0 (10.6.x here) are attributable. A plain '-B1' grep
+    # is not reliable for ipsec0: on this interface an 'options=...' line
+    # sits between the header and 'inet', so the preceding line is not the
+    # interface name. awk tracks the current interface across lines instead.
+    run_or_fail bash -c "ifconfig | awk '/^[a-zA-Z0-9]+:/{iface=\$1} /inet 10\.|inet 100\./{print iface, \$0}'"
+    echo
+
+    echo "=== nord-mode ==="
+    if [ "${NORD_DETECT_AVAILABLE}" -eq 1 ]; then
+        nord_mode
+    else
+        echo "unknown (lib/nord-detect.sh not found)"
+    fi
     echo
 
     echo "=== scutil ==="

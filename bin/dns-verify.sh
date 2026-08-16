@@ -6,10 +6,24 @@
 #
 # Prints a PASS/FAIL/SKIP table (one line per check) plus a leading network
 # state summary, and exits non-zero if any check FAILs. SKIPs do not affect
-# the exit code. Read-only: no sudo, no config mutation.
+# the exit code by themselves, EXCEPT that a missing 'nc -G' capability (see
+# below) forces a non-zero exit even if the resulting checks only SKIP/PASS,
+# since a required capability is missing. Read-only: no sudo, no config
+# mutation.
 #
 # Intentionally does NOT use 'set -e' since probe commands are expected to
 # fail without aborting the run — failures are data, not script errors.
+#
+# Name resolution and staleness checks run regardless of 'nc -G' support (no
+# TCP capability is needed for them); only the TCP service-reachability
+# checks are gated on 'nc -G' and SKIP (naming the missing capability, see
+# nc_dash_g_skip_reason) rather than aborting the whole run if it is absent.
+#
+# NordVPN detection distinguishes the native IKEv2 profile (ipsec0, supported
+# alongside Tailscale) from the NordVPN app's own tunnel (10.5.0.0/16 / DNS
+# 100.64.0.2, UNSUPPORTED alongside Tailscale) via lib/nord-detect.sh's
+# nord_mode. See that file for its own testing hook
+# (NORD_DETECT_IFCONFIG_OVERRIDE / NORD_DETECT_SCUTIL_DNS_OVERRIDE).
 #
 # Testing hook: DNS_VERIFY_EXPECT_<HOST>_OVERRIDE (host name upper-cased,
 # '-' -> '_') lets the staleness check be forced to compare against an
@@ -29,6 +43,17 @@ if ! SCRIPT_DIR="$(cd "${SCRIPT_PARENT}" && pwd)"; then
 fi
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export REPO_ROOT
+
+# Load the shared NordVPN mode detector (ikev2 vs app vs app+ikev2 vs
+# absent). Degrade to nordvpn=unknown rather than aborting if it is missing.
+NORD_DETECT_LIB="${REPO_ROOT}/lib/nord-detect.sh"
+if [ -f "${NORD_DETECT_LIB}" ]; then
+    # shellcheck source=lib/nord-detect.sh
+    . "${NORD_DETECT_LIB}"
+    NORD_DETECT_AVAILABLE=1
+else
+    NORD_DETECT_AVAILABLE=0
+fi
 
 HOSTS=(streamy mac-mini)
 
@@ -105,8 +130,9 @@ check_name_resolution() {
 # connect from a timeout-induced kill (the backgrounded subshell that
 # opens the fd stays alive holding it even after connecting, so the
 # timer's kill -9 reaps it either way and 'wait' returns 137 for both
-# outcomes). Rather than ship that ambiguity, this script hard-requires
-# nc -G support and fails loudly if it is absent.
+# outcomes). Rather than ship that ambiguity, the TCP service checks below
+# require nc -G support and SKIP (naming the missing capability) rather than
+# probing unreliably if it is absent -- see nc_dash_g_skip_reason.
 #
 # Returns 0 on a completed TCP handshake, 1 otherwise. Never hangs longer
 # than roughly (timeout + 1)s.
@@ -122,18 +148,16 @@ detect_nc_dash_g() {
     fi
 }
 
-require_nc_dash_g() {
+# Reason string for SKIPping the TCP service checks when nc lacks -G. Empty
+# when nc -G is supported (the normal path).
+nc_dash_g_skip_reason() {
     detect_nc_dash_g
     if [ "${NC_SUPPORTS_DASH_G}" != "yes" ]; then
-        echo "ERROR: dns-verify.sh requires 'nc' with -G (connection timeout) support," >&2
-        echo "       so service reachability checks can be bounded reliably. The 'nc'" >&2
-        echo "       on this system ('$(command -v nc 2>/dev/null || echo "not found")') does not advertise -G in 'nc -h'." >&2
-        echo "       There is no fallback probe: a bash /dev/tcp probe cannot distinguish" >&2
-        echo "       a successful connect from a timeout, so this script refuses to run" >&2
-        echo "       rather than silently report false results. Install/upgrade to a" >&2
-        echo "       BSD nc that supports -G, or update PATH to point at one." >&2
-        exit 1
+        printf "nc ('%s') does not support -G (connection timeout); cannot bound a TCP probe reliably" \
+            "$(command -v nc 2>/dev/null || echo "not found")"
+        return
     fi
+    printf ''
 }
 
 tcp_connect() {
@@ -146,7 +170,14 @@ check_service_any_port() {
     local host="$1" label="$2"
     shift 2
     local ports=("$@")
-    local addr
+    local addr skip_reason
+
+    skip_reason="$(nc_dash_g_skip_reason)"
+    if [ -n "${skip_reason}" ]; then
+        record SKIP "$(printf 'SKIP  service    %-16s %-24s -> %s' "${host}" "${label}" "${skip_reason}")"
+        return
+    fi
+
     addr="$(get_resolved_addr "${host}")"
 
     if [ -z "${addr}" ]; then
@@ -257,15 +288,23 @@ check_staleness() {
 
 # --- network state summary ---------------------------------------------------
 
+NORD_MODE_RAW=""
+NORD_MODE_BARE=""
+compute_nord_mode() {
+    if [ "${NORD_DETECT_AVAILABLE}" -eq 1 ]; then
+        NORD_MODE_RAW="$(nord_mode)"
+    else
+        NORD_MODE_RAW="unknown"
+    fi
+    # Strip any "(iface)" suffix to get the bare word (ikev2/app/app+ikev2/
+    # absent/unknown) for exit-code and check-row logic.
+    NORD_MODE_BARE="${NORD_MODE_RAW%%(*}"
+}
+
 network_state_summary() {
     local ts_state="down/unknown"
     if [ "${TAILSCALE_STATUS_OK}" -eq 1 ]; then
         ts_state="up"
-    fi
-
-    local nordvpn_state="absent"
-    if ifconfig utun11 2>/dev/null | grep -q 'inet '; then
-        nordvpn_state="present (utun11)"
     fi
 
     local home_lan_state="no"
@@ -278,18 +317,35 @@ network_state_summary() {
         esac
     fi
 
-    printf 'State: tailscale=%s  nordvpn=%s  home-lan=%s\n' "${ts_state}" "${nordvpn_state}" "${home_lan_state}"
+    printf 'State: tailscale=%s  nordvpn=%s  home-lan=%s\n' "${ts_state}" "${NORD_MODE_RAW}" "${home_lan_state}"
+}
+
+# WARN row + FAIL: the NordVPN app tunnel colliding with Tailscale's
+# 100.64/10 range is the known-broken configuration (100.64.0.2 vs the
+# tailnet). Counts as a FAIL so the exit code reflects the broken state.
+check_nord_app_tailscale_collision() {
+    case "${NORD_MODE_BARE}" in
+        app|app+ikev2) : ;;
+        *) return ;;
+    esac
+    if [ "${TAILSCALE_STATUS_OK}" -ne 1 ]; then
+        return
+    fi
+    record FAIL "WARN  nordvpn    app-tunnel present with tailscale up -- unsupported (100.64.0.2 collides with 100.64/10)"
 }
 
 # --- main --------------------------------------------------------------------
 
-require_nc_dash_g
-
 fetch_tailscale_status
+compute_nord_mode
 
 network_state_summary
 echo
 
+# Name resolution and staleness checks need no TCP capability at all, so run
+# them regardless of nc -G support: a machine lacking it still gets real DNS
+# diagnostics instead of an early abort (only the TCP service checks below
+# are gated on nc -G, and they degrade to SKIP rather than aborting the run).
 for h in "${HOSTS[@]}"; do
     check_name_resolution "${h}"
 done
@@ -301,12 +357,26 @@ for h in "${HOSTS[@]}"; do
     check_staleness "${h}"
 done
 
+check_nord_app_tailscale_collision
+
 echo
 for line in "${RESULT_LINES[@]}"; do
     printf '%s\n' "${line}"
 done
 echo
 printf 'Summary: %d passed, %d failed, %d skipped\n' "${PASS_COUNT}" "${FAIL_COUNT}" "${SKIP_COUNT}"
+
+# A missing nc -G is a required-capability gap, not merely a SKIP: force a
+# non-zero exit even if every individual check happened to PASS/SKIP.
+NC_DASH_G_MISSING=0
+if [ -n "$(nc_dash_g_skip_reason)" ]; then
+    NC_DASH_G_MISSING=1
+    echo "Note: TCP service checks were SKIPped ('nc -G' unavailable); exiting non-zero because that capability is required for a complete run." >&2
+fi
+
+if [ "${NC_DASH_G_MISSING}" -eq 1 ]; then
+    exit 1
+fi
 
 if [ "${FAIL_COUNT}" -gt 0 ]; then
     exit 1

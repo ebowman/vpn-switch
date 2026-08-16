@@ -22,6 +22,19 @@ if ! REPO_ROOT="$(cd "$SCRIPT_PARENT/.." 2>/dev/null && pwd)"; then
     REPO_ROOT="."
 fi
 
+# Load the shared NordVPN mode detector (ikev2 vs app vs app+ikev2 vs
+# absent). Degrade to a bare "unknown" reading rather than aborting if it is
+# missing (matches lib/tailscale-ctl.sh's no-side-effects-on-source
+# contract: sourcing it here only defines functions).
+NORD_DETECT_LIB="$REPO_ROOT/lib/nord-detect.sh"
+if [ -f "$NORD_DETECT_LIB" ]; then
+    # shellcheck source=lib/nord-detect.sh
+    . "$NORD_DETECT_LIB"
+    NORD_DETECT_AVAILABLE=1
+else
+    NORD_DETECT_AVAILABLE=0
+fi
+
 LABEL="${1:-watch}"
 DURATION="${2:-120}"
 OUTDIR="$REPO_ROOT/snapshots"
@@ -36,11 +49,21 @@ sample() {
     t="$(date '+%H:%M:%S' 2>/dev/null || echo '??:??:??')"
 
     # Nord's interface index drifts between sessions (utun11 has appeared at
-    # index 30, 37, 40), so detect by its tunnel addressing instead: Nord uses
-    # 10.5.0.0/16. Hard-coding utun11 produced a false "down" reading and cost
-    # us a measurement run.
-    nord="$(ifconfig 2>/dev/null | awk '/^utun/{i=$1} /inet 10\.5\./{print i; exit}')"
-    if [ -n "$nord" ]; then nord="up(${nord%:})"; else nord="down"; fi
+    # index 30, 37, 40), so detect by tunnel addressing/resolver instead of a
+    # hard-coded name (a hard-coded utun11 produced a false "down" reading
+    # and cost us a measurement run). The two NordVPN connection modes are
+    # distinguished: 'ikev2' is the native ipsec0-based profile (supported
+    # alongside Tailscale); 'app' is the NordVPN app's own tunnel
+    # (10.5.0.0/16 / resolver 100.64.0.2) -- the unsupported state that
+    # collides with Tailscale's 100.64/10. See lib/nord-detect.sh.
+    if [ "$NORD_DETECT_AVAILABLE" -eq 1 ]; then
+        nord="$(nord_mode)"
+    else
+        nord="unknown"
+    fi
+    case "$nord" in
+        absent) nord="down" ;;
+    esac
 
     ts_state="$(timeout 5 "$TS_BIN" status 2>&1 | head -1)"
     case "$ts_state" in
@@ -77,14 +100,16 @@ sample() {
         *)     web="FAIL($web)" ;;
     esac
 
-    printf '%s  nord=%-11s ts=%-11s claim=%-3s inet-dns=%-15s streamy-dns=%-15s ts-ping=%-4s lan-ping=%-4s WEB=%s\n' \
+    printf '%s  nord=%-14s ts=%-11s claim=%-3s inet-dns=%-15s streamy-dns=%-15s ts-ping=%-4s lan-ping=%-4s WEB=%s\n' \
         "$t" "$nord" "$ts_state" "$claimed" "$dns_gen" "$dns_streamy" "$ping_streamy" "$ping_lan" "$web"
 }
 
 {
     echo "=== dns-watch: $LABEL ==="
     echo "started: $(date 2>/dev/null || echo unknown)  duration: ${DURATION}s"
-    echo "columns: nord=NordVPN iface  ts=tailscale state  claim=100.64/10 claimed"
+    echo "columns: nord=NordVPN mode (ikev2(ipsec0)=native profile, app(utunN)=app tunnel"
+    echo "         [UNSUPPORTED w/ tailscale], app+ikev2=both, down=neither)"
+    echo "         ts=tailscale state  claim=100.64/10 claimed"
     echo "         inet-dns/streamy-dns=resolved addr or FAIL  ts-ping/lan-ping=ICMP"
     echo "         WEB=real HTTPS fetch — the ONLY column that proves usability."
     echo "         DNS+ICMP can all read green while the browser is dead; trust WEB."
