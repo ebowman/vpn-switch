@@ -9,6 +9,7 @@ enum SelfTest {
         print("VPNSwitch --selftest")
 
         print("resolvedPath: \(VPNCtl.resolvedPath() ?? "nil (not found)")")
+        print("loginItem: eligible=\(LoginItem.isEligible) registered=\(LoginItem.isRegistered)")
 
         print("\n--- status ---")
         let statusOutcome = VPNCtl.run(["status"])

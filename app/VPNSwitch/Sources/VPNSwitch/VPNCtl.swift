@@ -70,20 +70,32 @@ enum VPNCtl {
         }
     }
 
-    /// Default install location once packaged (qsk.7).
-    static let defaultPath = "/usr/local/bin/vpn-ctl.sh"
+    /// Default (no-sudo) install location: user-writable, installed by
+    /// bin/install-vpn-switch.sh (dns-config-qsk.7 DESIGN ADJUSTMENT --
+    /// no sudo by default).
+    static var defaultPath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent("Library/Application Support/vpn-switch/bin/vpn-ctl.sh").path
+    }
 
-    /// Fallback used only if the default isn't present -- NOT the sole
-    /// option, and not hard-coded as the only path: this is a fallback,
-    /// tried after `defaultPath`.
+    /// Opt-in system-wide install location (INSTALL_PREFIX=/usr/local,
+    /// requires sudo -- the install script prints but never runs those
+    /// commands). Tried after `defaultPath`.
+    static let optInSystemPath = "/usr/local/bin/vpn-ctl.sh"
+
+    /// Fallback used only if neither of the above is present -- a repo
+    /// checkout at the conventional location. NOT the sole option, and not
+    /// hard-coded as the only path: this is a last-resort fallback.
     static var fallbackPath: String {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent("src/dns-config/bin/vpn-ctl.sh").path
     }
 
     /// Resolves the configured/effective script path per the resolution
-    /// order: UserDefaults override -> defaultPath (if it exists) ->
-    /// fallbackPath (if it exists). Returns nil if none exist.
+    /// order (dns-config-qsk.7 DESIGN ADJUSTMENT): UserDefaults override ->
+    /// ~/Library/Application Support/vpn-switch/bin/vpn-ctl.sh ->
+    /// /usr/local/bin/vpn-ctl.sh -> ~/src/dns-config/bin/vpn-ctl.sh ->
+    /// not found (nil).
     static func resolvedPath() -> String? {
         if let configured = UserDefaults.standard.string(forKey: userDefaultsKey),
            !configured.isEmpty,
@@ -92,6 +104,9 @@ enum VPNCtl {
         }
         if FileManager.default.isExecutableFile(atPath: defaultPath) {
             return defaultPath
+        }
+        if FileManager.default.isExecutableFile(atPath: optInSystemPath) {
+            return optInSystemPath
         }
         if FileManager.default.isExecutableFile(atPath: fallbackPath) {
             return fallbackPath

@@ -9,6 +9,24 @@ struct VPNSwitchApp: App {
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.runAndExit()
         }
+        // CLI flags for the install/uninstall scripts (dns-config-qsk.7):
+        // register/unregister the login item without presenting the UI.
+        if CommandLine.arguments.contains("--register-login-item") {
+            if let error = LoginItem.register() {
+                FileHandle.standardError.write(Data("\(error)\n".utf8))
+                exit(1)
+            }
+            print("Login item registered.")
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--unregister-login-item") {
+            if let error = LoginItem.unregister() {
+                FileHandle.standardError.write(Data("\(error)\n".utf8))
+                exit(1)
+            }
+            print("Login item unregistered.")
+            exit(0)
+        }
     }
 
     var body: some Scene {
@@ -147,6 +165,18 @@ struct MenuContentView: View {
 
             Divider()
 
+            if model.loginItemEligible {
+                Toggle("Launch at login", isOn: Binding(
+                    get: { model.loginItemRegistered },
+                    set: { _ in model.toggleLoginItem() }
+                ))
+            } else {
+                Text("Launch at login")
+                Text("Install to /Applications first")
+            }
+
+            Divider()
+
             Button("Quit") {
                 model.stopPolling()
                 // Belt-and-braces for the case where a poll or toggle is
@@ -164,6 +194,15 @@ struct MenuContentView: View {
         // the first poll until the user opened the menu. startPolling() is
         // idempotent (guards on pollTask == nil), so no extra call is
         // needed here.
+        //
+        // This view IS rebuilt on every menu open (unlike the label above),
+        // so onAppear here is the right place to re-read SMAppService's real
+        // status each time the menu is opened (dns-config-qsk.7) -- reflects
+        // a change made in System Settings > Login Items directly, not just
+        // changes made from this app's own toggle.
+        .onAppear {
+            model.refreshLoginItemStatus()
+        }
     }
 
     /// "web=fail while both toggles report up" per the reshaped spec: a

@@ -15,6 +15,15 @@ final class AppModel: ObservableObject {
     @Published var isSwitching: Bool = false
     @Published var headerMessage: String? = nil
     @Published var scriptMissingPath: String? = nil
+    /// "Launch at login" toggle state, mirrored from SMAppService.mainApp
+    /// (dns-config-qsk.7). Re-read on menu open via refreshLoginItemStatus()
+    /// so a change made in System Settings > Login Items is reflected here
+    /// too, not just changes made from this app's own toggle.
+    @Published var loginItemRegistered: Bool = LoginItem.isRegistered
+    /// Whether the login item toggle should be enabled -- false (with a
+    /// hint) when the running app isn't under /Applications, since
+    /// SMAppService needs a stable path.
+    @Published var loginItemEligible: Bool = LoginItem.isEligible
     /// User preference: post a local notification when a poll detects a
     /// state change that this app did not cause (e.g. Tailscale toggled from
     /// its own menu, or Nord dropping). Persisted in UserDefaults; default on.
@@ -136,6 +145,30 @@ final class AppModel: ObservableObject {
     func openTailscaleApp() {
         let url = URL(fileURLWithPath: "/Applications/Tailscale.app")
         NSWorkspace.shared.open(url)
+    }
+
+    /// Re-reads SMAppService.mainApp's real status -- called on menu open so
+    /// the toggle reflects reality even if the user revoked/changed it from
+    /// System Settings > Login Items directly.
+    func refreshLoginItemStatus() {
+        loginItemEligible = LoginItem.isEligible
+        loginItemRegistered = LoginItem.isRegistered
+    }
+
+    /// Toggles the "Launch at login" state via SMAppService. No-op if not
+    /// eligible (app isn't running from /Applications).
+    func toggleLoginItem() {
+        guard loginItemEligible else { return }
+        if loginItemRegistered {
+            if let error = LoginItem.unregister() {
+                headerMessage = error
+            }
+        } else {
+            if let error = LoginItem.register() {
+                headerMessage = error
+            }
+        }
+        loginItemRegistered = LoginItem.isRegistered
     }
 
     private func runToggle(args: [String]) {
