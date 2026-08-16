@@ -27,6 +27,22 @@
 #   NORD_IKEV2_OUT      optional  output path for the .mobileconfig
 #                                 (default: "$HOME/Library/Application
 #                                 Support/vpn-switch/NordVPN-IKEv2.mobileconfig")
+#   NORD_IKEV2_SEARCH_DOMAINS
+#                       optional  space-separated search domain(s) to inject
+#                                 via the VPN payload's DNS.SearchDomains key
+#                                 (dns-config-j9y.3 / ADR-003 R1). Default:
+#                                 "home.arpa". Set to the empty string to
+#                                 disable the DNS dict entirely (restores the
+#                                 prior "no DNS override keys" behavior):
+#                                   NORD_IKEV2_SEARCH_DOMAINS="" bash bin/nord-ikev2-profile.sh
+#   NORD_IKEV2_DNS_SERVERS
+#                       optional  space-separated DNS.ServerAddresses to embed
+#                                 (Apple marks this key REQUIRED once a DNS
+#                                 dict is present at all). Default: NordVPN's
+#                                 own published resolvers, "103.86.96.100
+#                                 103.86.99.100" (docs/switcher/nord-ikev2-setup.md).
+#                                 Only meaningful when NORD_IKEV2_SEARCH_DOMAINS
+#                                 is non-empty.
 #
 # Output: a .mobileconfig file, mode 600, written OUTSIDE this repo. The file
 # CONTAINS THE SERVICE PASSWORD IN PLAINTEXT (Apple Configuration Profile
@@ -164,6 +180,75 @@ USER_ESC="$(xml_escape "${NORD_IKEV2_USER}")"
 PASS_ESC="$(xml_escape "${NORD_IKEV2_PASS}")"
 
 # ---------------------------------------------------------------------------
+# DNS dict (dns-config-j9y.3, ADR-003 R1). Defaulted ON: NORD_IKEV2_SEARCH_DOMAINS
+# defaults to "home.arpa" so a fresh regeneration includes it without the
+# caller having to know the flag exists; set it to the empty string to
+# disable ("" bash bin/nord-ikev2-profile.sh) and restore the prior
+# no-DNS-keys profile.
+#
+# Schema verified 2026-08-16 against Apple's Device Management reference
+# (fetched, not guessed):
+#   - developer.apple.com/.../devicemanagement/vpn.json: the VPN payload dict
+#     has a top-level "DNS" key (type VPN.DNS, sibling of "IKEv2") alongside
+#     IKEv2/IPSec/IPv4/etc.
+#   - developer.apple.com/.../devicemanagement/vpn/dns-data.dictionary.json:
+#     VPN.DNS fields --
+#       DNSProtocol                 string,   REQUIRED (allowed: Cleartext,
+#                                    HTTPS, TLS) -- we use "Cleartext".
+#       ServerAddresses             [string], REQUIRED once the DNS dict is
+#                                    present at all.
+#       SearchDomains                [string], optional -- "used to fully
+#                                    qualify single-label host names"; this is
+#                                    the key this bead needs.
+#       SupplementalMatchDomains,
+#       SupplementalMatchDomainsNoSearch,
+#       DomainName, PayloadCertificateUUID, ServerName, ServerURL
+#                                     optional, not set here.
+#
+# SupplementalMatchDomains is deliberately NOT set: routing of *.home.arpa is
+# already handled by /etc/resolver/home.arpa (port 5354, proven in
+# dns-config-j9y.3's root-step measurement); NE supplemental-match DNS
+# settings cannot carry a non-53 port, so setting it here would require a
+# port-53 daemon this design avoids. Only the SEARCH suffix needs to come
+# from the primary service (Nord's IKEv2 profile); the resolver file already
+# routes the expanded name.
+#
+# ServerAddresses is REQUIRED by the schema the moment a DNS dict exists at
+# all, even though this profile does not want to override Nord's
+# server-pushed resolvers for actual name resolution -- explicit here purely
+# to satisfy the schema; default is NordVPN's own documented DNS servers (the
+# same ones the server pushes), so this does not change what upstream
+# resolver traffic uses in practice.
+NORD_IKEV2_SEARCH_DOMAINS="${NORD_IKEV2_SEARCH_DOMAINS-home.arpa}"
+NORD_IKEV2_DNS_SERVERS="${NORD_IKEV2_DNS_SERVERS:-103.86.96.100 103.86.99.100}"
+
+DNS_DICT_BLOCK=""
+if [ -n "${NORD_IKEV2_SEARCH_DOMAINS}" ]; then
+    SEARCH_DOMAINS_XML=""
+    for _sd in ${NORD_IKEV2_SEARCH_DOMAINS}; do
+        SEARCH_DOMAINS_XML="${SEARCH_DOMAINS_XML}
+					<string>$(xml_escape "${_sd}")</string>"
+    done
+    SERVER_ADDRS_XML=""
+    for _sa in ${NORD_IKEV2_DNS_SERVERS}; do
+        SERVER_ADDRS_XML="${SERVER_ADDRS_XML}
+					<string>$(xml_escape "${_sa}")</string>"
+    done
+    DNS_DICT_BLOCK="
+			<key>DNS</key>
+			<dict>
+				<key>DNSProtocol</key>
+				<string>Cleartext</string>
+				<key>ServerAddresses</key>
+				<array>${SERVER_ADDRS_XML}
+				</array>
+				<key>SearchDomains</key>
+				<array>${SEARCH_DOMAINS_XML}
+				</array>
+			</dict>"
+fi
+
+# ---------------------------------------------------------------------------
 # Build the .mobileconfig.
 #
 # IKEv2 dict keys, validated against Apple's Configuration Profile Reference
@@ -232,7 +317,7 @@ PLIST_CONTENT="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 				<string>${PASS_ESC}</string>
 				<key>OnDemandEnabled</key>
 				<integer>0</integer>
-			</dict>
+			</dict>${DNS_DICT_BLOCK}
 		</dict>
 		<dict>
 			<key>PayloadType</key>

@@ -233,10 +233,86 @@ specific NordVPN server**. Using it instead of the app means giving up:
 - A `com.apple.security.root` payload embeds NordVPN's IKEv2 root CA
   (`config/nord-ikev2/nordvpn-root.der`) so the tunnel's server certificate
   chain validates without a separate manual Keychain-trust step.
-- **No DNS override keys are set.** This is intentional: `qsk.3c` needs to
-  observe whatever resolver Nord's IKEv2 server actually pushes, unmodified
-  by this profile.
 - **No `IncludeAllNetworks`, no `OnDemandRules`.**
+- **A `DNS` dict is included by default** (`dns-config-j9y.3`, ADR-003 R1) —
+  see "DNS search-domain dict" below. It does **not** override which
+  resolver actually answers queries (`qsk.3c`'s DNS-push observation still
+  holds): it only adds a *search domain*, so a bare hostname like `streamy`
+  gets expanded to `streamy.home.arpa` while this VPN is the primary network
+  service, the same way Tailscale's own suffix gets applied while Tailscale
+  is primary. Set `NORD_IKEV2_SEARCH_DOMAINS=""` to disable it and restore
+  the original no-DNS-keys profile.
+
+## DNS search-domain dict (why it exists, how to disable it)
+
+**Problem:** with the NordVPN IKEv2 profile up, macOS treats `ipsec0` as the
+primary network service. The effective search-domain list macOS applies to
+*unqualified* (bare) host names comes from the primary service's own DNS
+settings plus any NetworkExtension supplemental-match domains — **not** from
+`networksetup -setsearchdomains "Wi-Fi" ...`, which becomes inert once Nord
+IKEv2 is primary (measured on `dns-config-j9y.3`: `State:/Network/Global/DNS`
+showed only Tailscale's tailnet suffix, never Wi-Fi's `home.arpa`, while
+`ipsec0` was primary). Without a fix, bare `streamy`/`mac-mini` fail to
+resolve whenever Nord IKEv2 is up and Tailscale is down.
+
+**Fix:** the VPN payload (`com.apple.vpn.managed`) supports a `DNS`
+dictionary, a sibling key of `IKEv2` in the same payload dict, per Apple's
+Device Management reference
+(`developer.apple.com/.../devicemanagement/vpn.json` for the top-level VPN
+payload keys; `.../devicemanagement/vpn/dns-data.dictionary.json` for the
+`DNS` dict's own fields — fetched and confirmed 2026-08-16, not assumed).
+`bin/nord-ikev2-profile.sh` sets:
+
+```
+DNS.DNSProtocol      = "Cleartext"                          (required by schema)
+DNS.ServerAddresses  = ["103.86.96.100", "103.86.99.100"]    (required by schema
+                                                                once DNS is present
+                                                                at all; NordVPN's
+                                                                own published
+                                                                resolvers — the
+                                                                same ones the
+                                                                server pushes, so
+                                                                this does not
+                                                                change what
+                                                                actually answers
+                                                                queries)
+DNS.SearchDomains    = ["home.arpa"]                          (the point: makes
+                                                                bare names expand
+                                                                while this VPN is
+                                                                primary)
+```
+
+`DNS.SupplementalMatchDomains` is deliberately **not** set: routing of
+`*.home.arpa` queries is already handled by `/etc/resolver/home.arpa`
+(port 5354, proven working) — an NE supplemental-match DNS setting would
+need to name a server on port 53, which this design avoids (no root
+LaunchDaemon at runtime). Only the *search suffix* needs to come from the
+primary service; `/etc/resolver` already routes the expanded name.
+
+**Configuring it:**
+
+- `NORD_IKEV2_SEARCH_DOMAINS` (default: `"home.arpa"`) — space-separated
+  search domain(s) to embed. Set to the empty string to disable the whole
+  `DNS` dict and regenerate a profile with no DNS keys at all (the original
+  behavior):
+  ```
+  NORD_IKEV2_SEARCH_DOMAINS="" bash bin/nord-ikev2-profile.sh
+  ```
+- `NORD_IKEV2_DNS_SERVERS` (default: `"103.86.96.100 103.86.99.100"`) —
+  space-separated `DNS.ServerAddresses` override, only meaningful when
+  `NORD_IKEV2_SEARCH_DOMAINS` is non-empty.
+
+**Applying a change:** regenerate the profile (step 3 above) and reinstall
+it via **System Settings > Profiles** — the fixed `PayloadUUID`s mean
+reinstalling replaces the existing profile rather than duplicating it.
+Reinstalling may briefly drop the IKEv2 tunnel while the profile reloads.
+
+**If it doesn't work:** if macOS ignores `DNS.SearchDomains` for a
+personal (non-MDM) IKEv2 profile on this macOS version, the fallback is a
+separate `com.apple.dnsSettings.managed` DNS-settings profile with
+`SupplementalMatchDomains` — which needs a port-53 resolver (a root
+LaunchDaemon), a bigger privilege decision left to a human, not attempted
+here. See `dns-config-j9y.3`'s comment thread for the full analysis.
 
 ## Certificate provenance
 

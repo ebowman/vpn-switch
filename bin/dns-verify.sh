@@ -25,10 +25,39 @@
 # nord_mode. See that file for its own testing hook
 # (NORD_DETECT_IFCONFIG_OVERRIDE / NORD_DETECT_SCUTIL_DNS_OVERRIDE).
 #
-# Testing hook: DNS_VERIFY_EXPECT_<HOST>_OVERRIDE (host name upper-cased,
-# '-' -> '_') lets the staleness check be forced to compare against an
-# arbitrary IP instead of the live Tailscale address, so the FAIL path can
-# be exercised without mutating /etc/hosts. Not used in normal operation.
+# STATE-AWARE EXPECTATIONS (ADR-003, dns-config-j9y.3): the expected address
+# for each bare host name depends on whether Tailscale is up or down --
+#   - tailscale=up:   expect the live Tailscale (tailnet) IP (unchanged
+#                      behaviour from before this bead).
+#   - tailscale=down: expect the LAN IP from config/lan-hosts.conf (read via
+#                      lib/lan-hosts.sh), the "LAN table". At home this
+#                      should resolve via dnsmasq + the home.arpa search
+#                      domain (see docs/hostnames/lan-dns.md); away, dnsmasq
+#                      still answers the LAN address (a fast connection
+#                      failure is the expected/correct outcome there, per
+#                      ADR-003 -- this script does not attempt to
+#                      distinguish home vs away).
+# Staleness compares the resolved address against whichever table matches
+# the current Tailscale state, and reports "matches LAN table" / "LAN table
+# mismatch" (rather than "matches live Tailscale IP" / stale-vs-tailnet) when
+# tailscale is down.
+#
+# Testing hooks:
+#   - DNS_VERIFY_EXPECT_<HOST>_OVERRIDE (host name upper-cased, '-' -> '_')
+#     forces the staleness check's expected address to an arbitrary value
+#     regardless of which table would otherwise apply, so the FAIL path can
+#     be exercised without mutating /etc/hosts or config/lan-hosts.conf. Not
+#     used in normal operation.
+#   - DNS_VERIFY_TAILSCALE_STATE_OVERRIDE=up|down forces which table
+#     (tailnet vs LAN) this script treats as authoritative for BOTH the
+#     resolution expectation note and the staleness comparison, without
+#     actually toggling Tailscale -- lets the up/down expectation-switch
+#     logic itself be unit-tested (see docs/hostnames/lan-dns.md) in a
+#     single network state. It does NOT change what dscacheutil actually
+#     resolves (that still reflects real system state); it only changes
+#     which table this script compares against and how the State line's
+#     tailscale=<..> value is derived for that comparison. Not used in
+#     normal operation.
 
 set -u
 
@@ -53,6 +82,32 @@ if [ -f "${NORD_DETECT_LIB}" ]; then
     NORD_DETECT_AVAILABLE=1
 else
     NORD_DETECT_AVAILABLE=0
+fi
+
+# Load the LAN hosts table (ADR-003): config/lan-hosts.conf via
+# lib/lan-hosts.sh's lan_hosts_lan_ip / lan_hosts_tailnet_ip. Degrade rather
+# than abort if missing -- the LAN-table expectation/staleness checks below
+# SKIP (naming the reason) if this library is unavailable.
+LAN_HOSTS_LIB="${REPO_ROOT}/lib/lan-hosts.sh"
+if [ -f "${LAN_HOSTS_LIB}" ]; then
+    # shellcheck source=lib/lan-hosts.sh
+    . "${LAN_HOSTS_LIB}"
+    LAN_HOSTS_AVAILABLE=1
+else
+    LAN_HOSTS_AVAILABLE=0
+fi
+
+# Load lib/lan-dns.sh for its shared lan_dns_status probe (dns-config-j9y.3:
+# this script and bin/vpn-ctl.sh now share one implementation rather than
+# each keeping their own copy of the direct-probe logic). Degrade to
+# reporting "not-installed" for the State line's lan-dns= token if missing.
+LAN_DNS_LIB="${REPO_ROOT}/lib/lan-dns.sh"
+if [ -f "${LAN_DNS_LIB}" ]; then
+    # shellcheck source=lib/lan-dns.sh
+    . "${LAN_DNS_LIB}"
+    LAN_DNS_LIB_AVAILABLE=1
+else
+    LAN_DNS_LIB_AVAILABLE=0
 fi
 
 HOSTS=(streamy mac-mini)
@@ -110,6 +165,15 @@ check_name_resolution() {
     set_resolved_addr "${host}" "${addr}"
     if [ -n "${addr}" ]; then
         record PASS "$(printf 'PASS  name       %-16s -> %s' "${host}" "${addr}")"
+        return
+    fi
+
+    # No answer at all. With Tailscale down, this is the expected failure
+    # mode until the two one-time root steps (ADR-003) are applied -- name
+    # the likely cause explicitly rather than leaving the human to guess
+    # (see docs/hostnames/lan-dns.md).
+    if [ "$(dns_verify_effective_tailscale_state)" = "down" ]; then
+        record FAIL "$(printf 'FAIL  name       %-16s -> no answer — the home.arpa search suffix is not being applied. Check: (1) /etc/resolver/home.arpa installed? (2) NordVPN IKEv2 profile regenerated WITH the DNS block and reinstalled? (3) home.arpa in Wi-Fi search domains? See docs/hostnames/lan-dns.md' "${host}")"
     else
         record FAIL "$(printf 'FAIL  name       %-16s -> did not resolve (no ip_address from dscacheutil)' "${host}")"
     fi
@@ -244,25 +308,86 @@ tailscale_ip_for() {
     printf '%s\n' "${TAILSCALE_STATUS_OUTPUT}" | awk -v h="${host}" '$2 == h {print $1; exit}'
 }
 
+# dns_verify_effective_tailscale_state — "up" or "down", honoring
+# DNS_VERIFY_TAILSCALE_STATE_OVERRIDE (testing hook, see header comment) if
+# set to exactly "up" or "down"; otherwise derived from real
+# TAILSCALE_STATUS_OK (fetch_tailscale_status must have already run). This is
+# ONLY used to choose which table (tailnet vs LAN) the expectation/staleness
+# checks compare against -- it does not change what dscacheutil actually
+# resolves.
+dns_verify_effective_tailscale_state() {
+    case "${DNS_VERIFY_TAILSCALE_STATE_OVERRIDE:-}" in
+        up|down)
+            printf '%s\n' "${DNS_VERIFY_TAILSCALE_STATE_OVERRIDE}"
+            return
+            ;;
+    esac
+    if [ "${TAILSCALE_STATUS_OK}" -eq 1 ]; then
+        printf 'up\n'
+    else
+        printf 'down\n'
+    fi
+}
+
+# check_staleness — compare the resolved address for <host> against whichever
+# table (tailnet IP when effective state is "up", LAN table from
+# config/lan-hosts.conf when "down") applies, per ADR-003.
 check_staleness() {
     local host="$1"
     local resolved
     resolved="$(get_resolved_addr "${host}")"
 
-    if [ "${TAILSCALE_STATUS_OK}" -ne 1 ]; then
-        record SKIP "$(printf 'SKIP  staleness  %-16s -> tailscale status unavailable (Tailscale off or CLI not found)' "${host}")"
-        return
-    fi
+    local state
+    state="$(dns_verify_effective_tailscale_state)"
 
     local override_var expected
     override_var="$(env_override_var "${host}")"
     expected="${!override_var:-}"
+
+    if [ "${state}" = "up" ]; then
+        if [ "${TAILSCALE_STATUS_OK}" -ne 1 ] && [ -z "${expected}" ]; then
+            record SKIP "$(printf 'SKIP  staleness  %-16s -> tailscale status unavailable (Tailscale off or CLI not found)' "${host}")"
+            return
+        fi
+        if [ -z "${expected}" ]; then
+            expected="$(tailscale_ip_for "${host}")"
+        fi
+        if [ -z "${expected}" ]; then
+            record SKIP "$(printf 'SKIP  staleness  %-16s -> host not present in tailscale status output' "${host}")"
+            return
+        fi
+        if [ -z "${resolved}" ]; then
+            record SKIP "$(printf 'SKIP  staleness  %-16s -> cannot compare, name did not resolve' "${host}")"
+            return
+        fi
+
+        local verdict
+        verdict="$(compare_staleness "${resolved}" "${expected}")"
+        case "${verdict}" in
+            same)
+                record PASS "$(printf 'PASS  staleness  %-16s -> matches live Tailscale IP (%s)' "${host}" "${resolved}")"
+                ;;
+            stale)
+                record FAIL "$(printf 'FAIL  staleness  %-16s -> resolves to %s but live Tailscale IP is %s; check /etc/hosts or /etc/resolver/tailXXXX.ts.net' "${host}" "${resolved}" "${expected}")"
+                ;;
+            *)
+                record SKIP "$(printf 'SKIP  staleness  %-16s -> could not compare (missing data)' "${host}")"
+                ;;
+        esac
+        return
+    fi
+
+    # state == down: compare against the LAN table (ADR-003).
     if [ -z "${expected}" ]; then
-        expected="$(tailscale_ip_for "${host}")"
+        if [ "${LAN_HOSTS_AVAILABLE}" -ne 1 ]; then
+            record SKIP "$(printf 'SKIP  staleness  %-16s -> lib/lan-hosts.sh unavailable, cannot load LAN table' "${host}")"
+            return
+        fi
+        expected="$(lan_hosts_lan_ip "${host}")"
     fi
 
     if [ -z "${expected}" ]; then
-        record SKIP "$(printf 'SKIP  staleness  %-16s -> host not present in tailscale status output' "${host}")"
+        record SKIP "$(printf 'SKIP  staleness  %-16s -> host not present in config/lan-hosts.conf' "${host}")"
         return
     fi
 
@@ -275,15 +400,31 @@ check_staleness() {
     verdict="$(compare_staleness "${resolved}" "${expected}")"
     case "${verdict}" in
         same)
-            record PASS "$(printf 'PASS  staleness  %-16s -> matches live Tailscale IP (%s)' "${host}" "${resolved}")"
+            record PASS "$(printf 'PASS  staleness  %-16s -> matches LAN table (%s)' "${host}" "${resolved}")"
             ;;
         stale)
-            record FAIL "$(printf 'FAIL  staleness  %-16s -> resolves to %s but live Tailscale IP is %s; check /etc/hosts or /etc/resolver/tailXXXX.ts.net' "${host}" "${resolved}" "${expected}")"
+            record FAIL "$(printf 'FAIL  staleness  %-16s -> resolves to %s but LAN table says %s; LAN table mismatch -- check config/lan-hosts.conf or DHCP' "${host}" "${resolved}" "${expected}")"
             ;;
         *)
             record SKIP "$(printf 'SKIP  staleness  %-16s -> could not compare (missing data)' "${host}")"
             ;;
     esac
+}
+
+# --- lan-dns probe (ADR-003) --------------------------------------------------
+#
+# lan_dns_probe_state — print "answering", "not-answering", or
+# "not-installed" for the dnsmasq LaunchAgent bin/lan-dns-install.sh sets up.
+# Thin wrapper over lib/lan-dns.sh's lan_dns_status (dns-config-j9y.3: moved
+# there so this script and bin/vpn-ctl.sh share one implementation). Degrades
+# to "not-installed" if lib/lan-dns.sh itself could not be loaded, since that
+# is this script's own conservative default when a dependency is missing.
+lan_dns_probe_state() {
+    if [ "${LAN_DNS_LIB_AVAILABLE}" -eq 1 ]; then
+        lan_dns_status
+        return
+    fi
+    printf 'not-installed\n'
 }
 
 # --- network state summary ---------------------------------------------------
@@ -317,7 +458,10 @@ network_state_summary() {
         esac
     fi
 
-    printf 'State: tailscale=%s  nordvpn=%s  home-lan=%s\n' "${ts_state}" "${NORD_MODE_RAW}" "${home_lan_state}"
+    local lan_dns_state
+    lan_dns_state="$(lan_dns_probe_state)"
+
+    printf 'State: tailscale=%s  nordvpn=%s  home-lan=%s  lan-dns=%s\n' "${ts_state}" "${NORD_MODE_RAW}" "${home_lan_state}" "${lan_dns_state}"
 }
 
 # WARN row + FAIL: the NordVPN app tunnel colliding with Tailscale's
