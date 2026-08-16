@@ -35,7 +35,12 @@ sample() {
 
     t="$(date '+%H:%M:%S' 2>/dev/null || echo '??:??:??')"
 
-    if ifconfig utun11 2>/dev/null | grep -q 'inet '; then nord="up"; else nord="down"; fi
+    # Nord's interface index drifts between sessions (utun11 has appeared at
+    # index 30, 37, 40), so detect by its tunnel addressing instead: Nord uses
+    # 10.5.0.0/16. Hard-coding utun11 produced a false "down" reading and cost
+    # us a measurement run.
+    nord="$(ifconfig 2>/dev/null | awk '/^utun/{i=$1} /inet 10\.5\./{print i; exit}')"
+    if [ -n "$nord" ]; then nord="up(${nord%:})"; else nord="down"; fi
 
     ts_state="$(timeout 5 "$TS_BIN" status 2>&1 | head -1)"
     case "$ts_state" in
@@ -59,8 +64,13 @@ sample() {
 
     if timeout 3 ping -c1 -W1000 100.64.10.4 >/dev/null 2>&1; then ping_streamy="ok"; else ping_streamy="FAIL"; fi
 
-    printf '%s  nord=%-4s ts=%-12s claim=%-3s rt=%-7s inet-dns=%-15s streamy-dns=%-15s streamy-ping=%s\n' \
-        "$t" "$nord" "$ts_state" "$claimed" "$route_if" "$dns_gen" "$dns_streamy" "$ping_streamy"
+    # Reaching the LAN address bypasses both the tailnet and any resolver, so
+    # it separates "DNS is broken" from "the network path is gone".
+    local ping_lan
+    if timeout 3 ping -c1 -W1000 192.0.2.4 >/dev/null 2>&1; then ping_lan="ok"; else ping_lan="FAIL"; fi
+
+    printf '%s  nord=%-11s ts=%-12s claim=%-3s rt=%-7s inet-dns=%-15s streamy-dns=%-15s ts-ping=%-4s lan-ping=%s\n' \
+        "$t" "$nord" "$ts_state" "$claimed" "$route_if" "$dns_gen" "$dns_streamy" "$ping_streamy" "$ping_lan"
 }
 
 {
