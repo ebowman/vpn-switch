@@ -7,16 +7,22 @@ manual steps you perform yourself, described below.
 
 Display name used throughout: **`NordVPN IKEv2`** — this is the exact
 `UserDefinedName` baked into the generated profile, and is what will appear
-in `scutil --nc list`, System Settings > VPN, and Shortcuts.
+in System Settings > VPN and in Shortcuts. (It does **not** appear in
+`scutil --nc list`, even while connected — see "5. Verify".)
 
 ## Why this exists
 
 NordVPN's app cannot be scripted for switching (see `qsk.2`): no working URL
 actions, a lazily-built popover, a root helper, and an always-on kill switch.
 NordVPN's manually-configured IKEv2/IPsec service (documented in NordVPN
-support article 19921536696977) is a first-class macOS VPN service instead:
-it shows up in `scutil --nc list`, System Settings, and Shortcuts, and can be
-started/stopped with `scutil --nc start/stop` — no UI scripting required.
+support article 19921536696977) is a native macOS VPN configuration instead:
+it shows up in System Settings > VPN and in the Shortcuts "Set VPN" action,
+and — the decisive property — its DNS is pushed by Nord's server
+(`103.86.96.100`/`103.86.99.100`), not installed by the app at `100.64.0.2`,
+so it does not collide with Tailscale (see ADR-002). It is controlled via
+Shortcuts (section below), **not** `scutil --nc`: a profile-installed VPN
+config lives in NetworkExtension's store and `scutil --nc` cannot address it
+by name or by any UUID (verified 2026-08-16, `dns-config-qsk.10`).
 
 ## 1. Get the IKEv2 server hostname
 
@@ -101,25 +107,24 @@ The generator does not do this step — you do it manually:
 ## 5. Verify
 
 ```bash
-scutil --nc list
+profiles list            # expect: profileIdentifier: ie.boboco.vpn-switch.nordvpn-ikev2
 ```
 
-Look for an entry with the name `NordVPN IKEv2`. Record its UUID — later
-work (`qsk.10`) must select this VPN service **by UUID**, not by name, since
-`scutil --nc list` output is not guaranteed stable by name matching alone
-across services.
-
-You can also confirm it in **System Settings > VPN** and in the Shortcuts
-app's VPN action, where it will also show as `NordVPN IKEv2`.
-
-To start/stop without touching NordVPN's own app:
+Then open **System Settings > VPN**: `NordVPN IKEv2` is listed with a
+toggle. The profile installs it **disabled/disconnected**; the toggle is
+the connect switch. Flip it on once here to confirm it connects, then check:
 
 ```bash
-scutil --nc start "NordVPN IKEv2"
-scutil --nc stop "NordVPN IKEv2"
+ifconfig ipsec0 | grep inet          # a 10.x tunnel address, e.g. 10.6.0.41
+scutil --dns | grep -A2 'resolver #1' # nameserver 103.86.96.100 / 103.86.99.100
 ```
 
-(or use the recorded UUID in place of the name).
+Note what you will **not** see: `scutil --nc list` does not show this
+config — not by name, not by UUID, not even while connected. That is
+expected (NetworkExtension store, not SystemConfiguration), and it is why
+programmatic control goes through Shortcuts (next sections), and why
+`bin/dns-verify.sh` and friends detect Nord IKEv2 by the `ipsec0` interface
+and the `103.86.x` resolvers rather than by any service name.
 
 ## 6. Remove the profile
 
@@ -140,6 +145,53 @@ profiles remove -identifier ie.boboco.vpn-switch.nordvpn-ikev2
 (`profiles remove` may require `sudo` depending on how the profile was
 installed; if so, run it interactively yourself — do not script sudo into
 this pipeline.)
+
+## Shortcuts for NordVPN control
+
+`bin/vpn-ctl.sh` and `lib/nord-ctl.sh` control the `NordVPN IKEv2` profile
+through two Shortcuts you create once, by hand — there is no CLI or
+`profiles` handle for a profile-installed VPN on this macOS (see
+`dns-config-qsk.10`'s control-handle investigation for the dead ends:
+`scutil --nc` cannot address it, `profiles install` is removed, and System
+Settings > VPN is not UI-scriptable). Until both shortcuts exist,
+`vpn-ctl.sh nord on` / `nord off` exit **3** with a message pointing back
+here.
+
+1. Open **Shortcuts.app**.
+2. Click **+** to create a new shortcut.
+3. Search the action library for **"Set VPN"** and add it.
+4. In the action, set **VPN** to **`NordVPN IKEv2`** (the profile installed
+   earlier in this document) and **Mode** to **Connect**.
+5. Rename the shortcut (click its name at the top) to **exactly**
+   `NordVPN On` — no extra punctuation, no trailing space. The scripts
+   match this name literally.
+6. Repeat steps 2-4 for a second shortcut, this time with **Mode** set to
+   **Disconnect**, named **exactly** `NordVPN Off`.
+7. **Do not use Mode "Toggle"** for either shortcut — `nord_connect` and
+   `nord_disconnect` each need a one-directional, idempotent action; a
+   toggle would flip the tunnel the wrong way whenever it is invoked while
+   already in the target state.
+
+Confirm both were created correctly:
+
+```bash
+shortcuts list | grep -i nordvpn
+```
+
+This should print exactly:
+
+```
+NordVPN On
+NordVPN Off
+```
+
+Once both exist, `vpn-ctl.sh nord on` / `nord off` work immediately with no
+code change — the library invokes `shortcuts run "NordVPN On"` /
+`shortcuts run "NordVPN Off"` and then verifies the result against reality
+(the `ipsec0` interface and the `103.86.x` resolvers), never trusting the
+`shortcuts run` exit code — it reports success (exit 0) even when the named
+shortcut does not exist at all, which is exactly the case `vpn-ctl.sh`'s
+exit-3 check exists to catch before ever invoking anything.
 
 ## What you lose compared to the NordVPN app
 
