@@ -42,6 +42,14 @@ OUTFILE="$OUTDIR/$LABEL.log"
 
 mkdir -p "$OUTDIR" 2>/dev/null || { echo "Warning: cannot create $OUTDIR" >&2; OUTFILE="/dev/stdout"; }
 
+# Refuse to overwrite an existing log. Two earlier captures cited as evidence
+# were silently destroyed by re-running with the same label; the header write
+# below truncates. Set DNS_WATCH_OVERWRITE=1 to allow it deliberately.
+if [ -e "$OUTFILE" ] && [ "${DNS_WATCH_OVERWRITE:-0}" != "1" ]; then
+    echo "Error: $OUTFILE already exists — pick a new label, or set DNS_WATCH_OVERWRITE=1 to replace it" >&2
+    exit 1
+fi
+
 # One line of state. Every probe is bounded so a dead network cannot stall us.
 sample() {
     local t nord ts_state claimed dns_gen dns_streamy ping_streamy
