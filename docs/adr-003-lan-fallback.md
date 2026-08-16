@@ -1,6 +1,6 @@
 # ADR-003: LAN fallback for bare hostnames when Tailscale is off
 
-- **Status:** Accepted (operator chose option C, 2026-08-16)
+- **Status:** Accepted (operator chose option C, 2026-08-16); **amended 2026-08-16 23:40** after implementation measurements — see §2a
 - **Date:** 2026-08-16
 - **Relates to:** ADR-002 (scenario C: "Tailscale off ⇒ `.local` only") — this ADR closes that gap.
 
@@ -68,6 +68,63 @@ Expected behaviour by state:
 Note the correction to an earlier informal claim: away with Tailscale off,
 this design answers the LAN IP; it does not return "no answer". Both fail
 to connect; this one fails fast.
+
+## 2a. Amendment (2026-08-16, after applying the root steps)
+
+Applying the design exposed one wrong assumption and produced two
+refinements. Both are still "option C" — dnsmasq + `home.arpa` +
+`/etc/resolver` — but the *search suffix* has to be attached differently,
+and dnsmasq should answer per state.
+
+**What was measured** (bead `dns-config-j9y.3`):
+
+- `/etc/resolver/home.arpa` with `port 5354` **works** on this macOS: the
+  system resolver returns 192.0.2.4 for `streamy.home.arpa` (Homebrew's
+  caveat about non-53 ports on 127.0.0.1 did not bite).
+- With `home.arpa` on Wi-Fi's search list and Tailscale off, bare `streamy`
+  still returned **no answer** — and dnsmasq's query log showed **no
+  `streamy.home.arpa` query ever arrived**. macOS never expanded the name.
+- Why: `State:/Network/Global/DNS` — the search list macOS actually applies
+  to unqualified names — held **only** `tailXXXX.ts.net`. The primary
+  service was the NordVPN IKEv2 configuration on `ipsec0`, whose
+  server-pushed DNS has no search domains; Wi-Fi's list is not consulted
+  when Wi-Fi is not primary. Tailscale's suffix gets in regardless because
+  it is registered as a NetworkExtension *supplemental match* domain. (This
+  retroactively explains why the `local` search domain measured in j9y.1 did
+  nothing either.)
+
+**Refinement 1 — attach the suffix to the primary.** Apple's VPN payload
+`DNS` dictionary has `SearchDomains` ("used to fully qualify single-label
+host names"); the NordVPN IKEv2 profile now carries
+`DNS.SearchDomains=[home.arpa]` with `ServerAddresses` = Nord's documented
+`103.86.96.100/103.86.99.100` (required key; identical to what the server
+pushes) and `DNSProtocol=Cleartext`. Wi-Fi keeps `home.arpa` for the states
+where Wi-Fi is primary (Nord off). Routing of the expanded name is
+unchanged: `/etc/resolver/home.arpa` (domain-scoped, chosen by specificity).
+Fallback if a non-MDM personal-VPN profile ignores its DNS dictionary: a
+`com.apple.dnsSettings.managed` profile with `SupplementalMatchDomains` —
+which cannot carry a port, so dnsmasq would need 127.0.0.1:53 and therefore
+a root LaunchDaemon (a privilege decision for the operator).
+
+**Refinement 2 — dnsmasq answers the right address for the state.** Names
+are served from a generated hosts file (`addn-hosts`, re-read on `SIGHUP`)
+that `vpn-ctl.sh` re-renders when Tailscale changes: **tailnet IPs while
+Tailscale is up, LAN IPs while it is down.** `config/lan-hosts.conf` gains a
+tailnet column. Consequence: bare names are correct in every state
+*regardless of which suffix macOS tries first* — including away from home
+with Tailscale up — with no root at runtime, since dnsmasq is user-level.
+This is the dynamism of the `/etc/hosts` idea without touching `/etc/hosts`.
+
+Revised expected behaviour:
+
+| State | bare `streamy` → | suffix from | answer from |
+|---|---|---|---|
+| Tailscale on, Nord IKEv2 on | 100.64.10.4 | `tailXXXX.ts.net` (Tailscale) or `home.arpa` (Nord profile) — order irrelevant | MagicDNS or dnsmasq (tailnet IP either way) |
+| Tailscale on, Nord off | 100.64.10.4 | `tailXXXX.ts.net` or `home.arpa` (Wi-Fi) | same |
+| Tailscale off, Nord IKEv2 on | 192.0.2.4 | `home.arpa` (Nord profile) | dnsmasq, LAN IP |
+| Tailscale off, Nord off | 192.0.2.4 | `home.arpa` (Wi-Fi) | dnsmasq, LAN IP |
+| Away, Tailscale on | 100.64.10.4 | as above | tailnet IP — reachable |
+| Away, Tailscale off | 192.0.2.4 (unreachable) | — | no correct answer exists |
 
 ## 3. Alternatives considered
 
