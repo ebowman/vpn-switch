@@ -14,7 +14,7 @@ I'm hitting a reproducible conflict between the NordVPN macOS client and Tailsca
 
 **Environment**
 
-- macOS (Darwin 25.5.0), Apple Silicon
+- macOS (Darwin 25.5.0), Apple M2 Max
 - NordVPN macOS app, connected over the standard tunnel (`utun`, tunnel address 10.5.0.2)
 - Tailscale 1.102.2 (standalone build)
 
@@ -34,13 +34,7 @@ route -n get 100.64.0.2      ->  interface: utun19                      (Tailsca
 dig @100.64.0.2 apple.com A  ->  ";; connection timed out; no servers could be reached"
 ```
 
-Nothing about NordVPN changed between those two measurements. The only variable is whether Tailscale is running and claiming `100.64.0.0/10`.
-
-For contrast, a resolver outside that range answers normally in both states, which is what points at the address rather than at the tunnel:
-
-```
-dig @100.100.100.100 <hostname>  ->  answers correctly, Tailscale on or off
-```
+Nothing about NordVPN changed between those two measurements. The only variable is whether Tailscale is running and claiming `100.64.0.0/10`. A resolver outside that range answers normally in both states, which is what points at the address rather than at your tunnel.
 
 **Why this is difficult to work around**
 
