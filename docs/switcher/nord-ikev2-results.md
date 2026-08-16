@@ -58,8 +58,8 @@ ordering that deadlocked under the app (Tailscale left "Logged Out"):
 | Reverse order (IKEv2 started while Tailscale already Running) | UNMEASURED as a discrete test — but the first connect at §1 was made with Tailscale *off*, and §2 then started Tailscale second; the opposite order is covered by qsk.11 |
 | Sleep / wake | UNMEASURED (cannot be run unattended) — qsk.11 |
 | Nord IKEv2 reconnect / server drop | UNMEASURED — qsk.11 |
-| Long soak (>1 min) | UNMEASURED — qsk.11 |
-| Throughput IKEv2 vs NordLynx | UNMEASURED — qsk.11 |
+| Long soak | **35 min, 900 samples @2 s: 886 fully green, 14 in a deliberate Tailscale-off window (WEB ok even then), 0 WEB failures, Nord never dropped** — `snapshots/soak-both-up-30min.log` |
+| Throughput IKEv2 (NordLynx: UNMEASURED) | **216.3 / 199.6 / 194.4 Mbit/s** (100 MB from ash-speed.hetzner.com, 3 runs) — qsk.11 |
 
 ## 4. Programmatic control — what works and what does not
 
