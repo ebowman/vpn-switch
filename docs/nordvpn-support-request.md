@@ -58,6 +58,49 @@ Eric
 
 ---
 
+## Addendum (2026-08-16) — optional follow-up, sharpened by later findings
+
+*Not yet sent. If the ticket is still open, this replaces the original
+questions with a much narrower one. Paste it as a reply.*
+
+---
+
+Update from my side, which narrows this considerably.
+
+I set up NordVPN on the same Mac using your **manual IKEv2/IPsec** method
+(support article 19921536696977) instead of the app. It works, and it works
+**alongside Tailscale with no problems at all** — both up simultaneously,
+DNS fine, tailnet reachable, verified over an hour.
+
+The reason it works is the DNS your IKEv2 server pushes to the client:
+
+```
+scutil --dns  (NordVPN IKEv2 connected)
+  nameserver[0] : 103.86.96.100
+  nameserver[1] : 103.86.99.100
+```
+
+Those are your documented DNS servers, and they are outside `100.64.0.0/10`.
+The macOS **app**, on the same account and same machine, installs
+`100.64.0.2` instead — which is inside the CGNAT range Tailscale claims, and
+that single address is what breaks everything.
+
+So my question is now just this:
+
+**Why does the macOS app publish `100.64.0.2` as the system resolver when
+your own IKEv2 servers push `103.86.96.100/103.86.99.100`, and is there any
+way to make the app do the same?** If `100.64.0.2` is a local forwarder
+inside the NordLynx tunnel, exposing it at an address outside CGNAT space
+would remove the conflict with Tailscale (and Mullvad, and any other CGNAT
+user) without changing anything else.
+
+I have a working configuration regardless, so this is a product question
+rather than a support emergency — but it affects anyone running both.
+
+Thanks again for your help.
+
+---
+
 ## Notes for the sender (not part of the message)
 
 - **Tone is deliberately factual, not annoyed.** First-line support handles volume; a clear reproduction with a specific ask is far more likely to get escalated than a complaint.
