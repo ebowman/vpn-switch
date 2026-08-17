@@ -9,6 +9,29 @@ measured), see [`docs/findings.md`](docs/findings.md); for the decision
 record, see [`docs/adr-002-nordvpn-ikev2.md`](docs/adr-002-nordvpn-ikev2.md).
 This README does not repeat either — it links them.
 
+## 0. The 30-second version (read this first)
+
+**How do I turn NordVPN on or off now?** Not with the NordVPN app — that is
+the one thing that must stay disconnected (its tunnel collides with
+Tailscale). Use either:
+
+- **VPN Switch** (menu bar) → click **NordVPN**. *Requires the two Shortcuts
+  below to exist; until then the toggle shows a message telling you so.*
+- **System Settings → VPN → NordVPN IKEv2 → toggle.**
+
+**How do I turn Tailscale on or off?** VPN Switch → **Tailscale**, or the
+Tailscale menu bar app. Both are fine.
+
+**Both on at once is the normal state.** Bare `streamy` / `mac-mini`
+resolve in every combination: tailnet IPs while Tailscale is up, LAN IPs
+while it is off (at home).
+
+**One-time step that makes VPN Switch drive NordVPN:** open **Shortcuts.app**
+→ **+** → add the **Set VPN** action → VPN: **NordVPN IKEv2** → **Connect** →
+name it exactly `NordVPN On`. Repeat with **Disconnect** → `NordVPN Off`.
+(Not "Toggle".) That is the only handle macOS offers for a profile-installed
+VPN; everything else in this repo already works without it.
+
 ## 1. What this repo is
 
 Bare hostnames (`streamy`, `mac-mini`) sometimes failed to resolve, and
