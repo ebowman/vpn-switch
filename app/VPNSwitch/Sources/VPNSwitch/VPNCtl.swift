@@ -88,13 +88,13 @@ enum VPNCtl {
     /// hard-coded as the only path: this is a last-resort fallback.
     static var fallbackPath: String {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent("src/dns-config/bin/vpn-ctl.sh").path
+        return home.appendingPathComponent("src/vpn-switch/bin/vpn-ctl.sh").path
     }
 
     /// Resolves the configured/effective script path per the resolution
     /// order (dns-config-qsk.7 DESIGN ADJUSTMENT): UserDefaults override ->
     /// ~/Library/Application Support/vpn-switch/bin/vpn-ctl.sh ->
-    /// /usr/local/bin/vpn-ctl.sh -> ~/src/dns-config/bin/vpn-ctl.sh ->
+    /// /usr/local/bin/vpn-ctl.sh -> ~/src/vpn-switch/bin/vpn-ctl.sh ->
     /// not found (nil).
     static func resolvedPath() -> String? {
         if let configured = UserDefaults.standard.string(forKey: userDefaultsKey),

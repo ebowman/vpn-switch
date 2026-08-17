@@ -233,7 +233,7 @@ Relevant keys and **current values** from `defaults read com.nordvpn.macos`:
 | `vpnSnoozedName` / `vpnSnoozedStart` / `vpnSnoozedUntil` | `"five_min"` / `1786868288` / `0` | A "snooze" (temporary pause/resume) concept exists in prefs — `vpnSnoozedUntil = 0` suggests not currently snoozed. This is the closest thing to a "pause" primitive but it is state read from prefs, not confirmed to be settable via `defaults write` to trigger an actual pause (untested, and even if writable, the app would need to notice the change — no evidence it polls this key).
 | `isAppWasConnectedToVPN` | `0` | Tracks last known connection state (informational, likely not authoritative for the running tunnel). |
 | `lastConnectionDate` | `"2026-08-16 09:24:19 +0000"` | Timestamp of last connection. |
-| `enableCustomDNS` / `customDNS` | `1` / `("103.86.96.100","103.86.99.100")` | Custom DNS is enabled with Nord's own resolvers — directly relevant to the dns-config switcher's DNS-conflict concerns. |
+| `enableCustomDNS` / `customDNS` | `1` / `("103.86.96.100","103.86.99.100")` | Custom DNS is enabled with Nord's own resolvers — directly relevant to this project's DNS-conflict concerns. |
 | `threatProtection` | `0` | Threat Protection (separate from the always-active Shield endpoint-security extension) is off. |
 | `meshnetEnabled` | `0` | Meshnet off. |
 | `startOnBoot` | `0` | Launch-at-login-equivalent flag, off. |

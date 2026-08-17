@@ -1,4 +1,4 @@
-# dns-config
+# vpn-switch
 
 NordVPN and Tailscale coexist on one Mac without breaking DNS.
 
