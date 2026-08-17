@@ -60,6 +60,16 @@ final class AppModel: ObservableObject {
     /// notification logic below can tell "I changed this" apart from "it
     /// changed on its own" -- notifications are only posted for the latter.
     private var selfInitiatedChangeInFlight = false
+    /// True while a background `lan-dns sync` run (dns-config-qsk.12) is
+    /// in flight. Used to coalesce: a second observed transition while one
+    /// sync is still running is simply skipped rather than queued -- if
+    /// Tailscale has moved again, the next poll's own from/to comparison
+    /// will observe that further transition and trigger its own sync.
+    private var lanDNSSyncInFlight = false
+    /// Count of `lan-dns sync` runs triggered by this model, for
+    /// verification/logging (dns-config-qsk.12 DONE criteria: "verify with
+    /// a counter/log").
+    private(set) var lanDNSSyncCount = 0
 
     init() {
         notifyOnExternalChanges = (UserDefaults.standard.object(forKey: Self.notifyKey) as? Bool) ?? true
@@ -86,6 +96,14 @@ final class AppModel: ObservableObject {
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     await self?.pollTick(force: true)
+                    // Force a resync regardless of whether the wake-time
+                    // poll observed a ts transition: Tailscale may have
+                    // flipped and flipped back while asleep (no net change
+                    // for the from/to comparison to catch), or dnsmasq may
+                    // have been restarted independently -- either way the
+                    // hosts file should be re-rendered against current
+                    // reality after a sleep/wake cycle.
+                    self?.forceLANDNSSync(reason: "wake")
                 }
             }
         }
@@ -243,6 +261,9 @@ final class AppModel: ObservableObject {
             isSwitching = false
         }
         notifyIfExternalChange(from: previousStatus, to: status)
+        // Independent of notifyOnExternalChanges -- the resolver must stay
+        // truthful even if the user has notifications turned off.
+        syncLANDNSIfNeeded(from: previousStatus, to: status, reason: "poll")
         return failed
     }
 
@@ -268,6 +289,65 @@ final class AppModel: ObservableObject {
         }
         guard !lines.isEmpty else { return }
         postNotification(body: lines.joined(separator: "\n"))
+    }
+
+    /// Re-syncs dnsmasq's hosts file (`vpn-ctl.sh lan-dns sync`) when a poll
+    /// observes that Tailscale's state changed and this app did not itself
+    /// cause the change (dns-config-qsk.12). vpn-ctl.sh's own `tailscale
+    /// on|off` already calls lan_dns_sync internally, so a self-initiated
+    /// toggle must not trigger a second, redundant run here -- guarded via
+    /// `selfInitiatedChangeInFlight`.
+    private func syncLANDNSIfNeeded(from previous: VPNStatus, to current: VPNStatus, reason: String) {
+        guard !selfInitiatedChangeInFlight else { return }
+        // First poll after launch: previous is the all-default placeholder
+        // and there is nothing meaningful to compare against yet.
+        guard previous != VPNStatus() else { return }
+        guard previous.ts != current.ts else { return }
+        guard !lanDNSSyncInFlight else { return }
+        runLANDNSSync(logDetail: "ts \(previous.ts.label) -> \(current.ts.label)", reason: reason)
+    }
+
+    /// Forces one `lan-dns sync` run regardless of whether an observed
+    /// transition occurred -- used after a wake, since Tailscale may have
+    /// flipped and flipped back while asleep (no net change for the
+    /// from/to comparison in `syncLANDNSIfNeeded` to catch) or dnsmasq may
+    /// have been restarted independently. Shares the same in-flight/
+    /// self-initiated guards.
+    private func forceLANDNSSync(reason: String) {
+        guard !selfInitiatedChangeInFlight else { return }
+        guard !lanDNSSyncInFlight else { return }
+        runLANDNSSync(logDetail: "forced", reason: reason)
+    }
+
+    /// Shared runner for both sync paths above: sets the in-flight guard,
+    /// bumps the counter, logs, and runs `vpn-ctl.sh lan-dns sync` off the
+    /// main thread. This is background housekeeping -- unlike toggle/status
+    /// failures, a failed sync here does not set `headerMessage` or post a
+    /// notification; it is only logged via NSLog. Must not block the UI or
+    /// the poll loop.
+    private func runLANDNSSync(logDetail: String, reason: String) {
+        lanDNSSyncInFlight = true
+        lanDNSSyncCount += 1
+        NSLog("VPNSwitch: lan-dns sync (%@): %@", reason, logDetail)
+        Task.detached { [weak self] in
+            let outcome = VPNCtl.run(["lan-dns", "sync"], timeout: 30)
+            switch outcome {
+            case .failure(.scriptNotFound(let path)):
+                NSLog("VPNSwitch: lan-dns sync (%@) failed: script not found at %@", reason, path)
+            case .success(let result):
+                if result.timedOut {
+                    NSLog("VPNSwitch: lan-dns sync (%@) timed out after 30s", reason)
+                } else if result.exitCode != 0 {
+                    NSLog(
+                        "VPNSwitch: lan-dns sync (%@) failed (exit %d): %@",
+                        reason,
+                        result.exitCode,
+                        result.lastMessageLine ?? ""
+                    )
+                }
+            }
+            await MainActor.run { self?.lanDNSSyncInFlight = false }
+        }
     }
 
     private func postNotification(body: String) {

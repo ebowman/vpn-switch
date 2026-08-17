@@ -203,6 +203,18 @@ re-sync (`dns-config-qsk.12`); toggling via VPN Switch/`vpn-ctl.sh` measured
 no such lag (+4 s to switch off, +1 s to switch back on, correct on the
 first probe both times).
 
+**External Tailscale changes re-sync the resolver too.** VPN Switch's poll
+loop compares Tailscale's state across polls; when it observes a change
+that VPN Switch itself did not initiate (the Tailscale app's own menu, a
+reconnect, or a state change during sleep), it runs `vpn-ctl.sh lan-dns
+sync` in the background so dnsmasq's answers follow within one poll
+interval (default 5 s), the same way a VPN Switch-driven toggle already
+does. This also runs once on wake, independent of whether a state change
+was observed, since Tailscale can flip and flip back while asleep. It never
+runs on steady-state polls and is silent housekeeping — failures are logged
+(Console.app / `log show --predicate 'process == "VPNSwitch"'`) but never
+shown in the menu bar UI.
+
 ## 5. Verifying
 
 ```
