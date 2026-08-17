@@ -9,3 +9,6 @@
 # (Library/Application Support/vpn-switch) is outside the repo anyway.
 *.mobileconfig
 config/nord-ikev2/*.env
+
+# macOS
+.DS_Store
