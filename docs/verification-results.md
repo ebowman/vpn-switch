@@ -82,7 +82,7 @@ Measured 2026-08-17, Nord IKEv2 on throughout:
   as bead dns-config-qsk.12.
 - Nord on/off transitions: measured 2026-08-17 18:24 via `bin/vpn-ctl.sh`
   (the app's exact code path), using the two Shortcuts ('NordVPN On' /
-  'NordVPN Off', README §3(c)), home LAN:
+  'NordVPN Off', runbook §3(c)), home LAN:
   - `nord on → off` (ts on): rc 0 at +0 s (shortcut returns immediately;
     `ipsec0` gone at +3 s). Resulting state (nord off, ts on) is row L3
     above.

@@ -1,13 +1,15 @@
-# dns-config
+# Runbook: NordVPN + Tailscale + VPN Switch on macOS
+
+This is the full operational runbook. The short overview is the repository [README](../README.md).
 
 VPN Switch's runbook for this Mac: what runs, how to set up a fresh machine,
 daily use, verification, troubleshooting, tradeoffs, and uninstall. This
 document assumes the **final** setup — Tailscale standalone + NordVPN over a
 native IKEv2 profile + the VPN Switch menu bar app. For the full narrative of
 how that setup was arrived at (what broke, what was tried, what was
-measured), see [`docs/findings.md`](docs/findings.md); for the decision
-record, see [`docs/adr-002-nordvpn-ikev2.md`](docs/adr-002-nordvpn-ikev2.md).
-This README does not repeat either — it links them.
+measured), see [`docs/findings.md`](findings.md); for the decision
+record, see [`docs/adr-002-nordvpn-ikev2.md`](adr-002-nordvpn-ikev2.md).
+This runbook does not repeat either — it links them.
 
 ## 0. The 30-second version (read this first)
 
@@ -49,8 +51,8 @@ outside CGNAT space, so there is nothing for Tailscale's route to capture,
 and the two coexist cleanly. The **VPN Switch** menu bar app and
 `bin/vpn-ctl.sh` give independent on/off control of both, with status derived
 from reality (interfaces, resolvers, a real HTTPS fetch), never from a status
-API alone. Full story: [`docs/findings.md`](docs/findings.md). Decision:
-[`docs/adr-002-nordvpn-ikev2.md`](docs/adr-002-nordvpn-ikev2.md).
+API alone. Full story: [`docs/findings.md`](findings.md). Decision:
+[`docs/adr-002-nordvpn-ikev2.md`](adr-002-nordvpn-ikev2.md).
 
 ## 2. What runs on the Mac
 
@@ -59,7 +61,7 @@ API alone. Full story: [`docs/findings.md`](docs/findings.md). Decision:
 | Tailscale | **Standalone build** (not the Mac App Store build) | Sandboxed MAS build has no `tailscale` CLI on PATH and withholds most config surface; the standalone build is needed for the real CLI (`dns-config-p6t`). |
 | NordVPN | **Native IKEv2 configuration profile** — NOT the NordVPN app's own tunnel | The app's tunnel is the source of the `100.64.0.2` collision (Section 1). The app may stay installed, but its tunnel must never be connected at the same time as Tailscale — see Section 6. |
 | VPN Switch | Menu bar app (`app/VPNSwitch/`), SwiftUI `MenuBarExtra` | Independent status + toggles for both, driving `bin/vpn-ctl.sh`. |
-| LAN DNS (dnsmasq) | **User** LaunchAgent, `dnsmasq` bound to `127.0.0.1:5354`, authoritative for `home.arpa` | Bare `streamy` / `mac-mini` resolve to LAN IPs at home when Tailscale is off, instead of returning no answer — [`docs/adr-003-lan-fallback.md`](docs/adr-003-lan-fallback.md). |
+| LAN DNS (dnsmasq) | **User** LaunchAgent, `dnsmasq` bound to `127.0.0.1:5354`, authoritative for `home.arpa` | Bare `streamy` / `mac-mini` resolve to LAN IPs at home when Tailscale is off, instead of returning no answer — [`docs/adr-003-lan-fallback.md`](adr-003-lan-fallback.md). |
 | Scripts | `bin/vpn-ctl.sh`, `bin/dns-verify.sh`, `bin/dns-watch.sh`, `bin/dns-snapshot.sh`, `bin/nord-ikev2-profile.sh`, `bin/lan-dns-install.sh`, `bin/lan-dns-uninstall.sh`, `lib/*.sh` (incl. `lib/lan-dns.sh`, `lib/lan-hosts.sh`) | Control and verification, all read-only except `vpn-ctl.sh`'s toggles and the LAN DNS install/uninstall pair; see each script's own header for its contract. |
 
 ## 3. Setting up a fresh Mac
@@ -74,7 +76,7 @@ After install, confirm the CLI is present: `tailscale version`.
 
 ### (b) NordVPN IKEv2 profile
 
-Full runbook: [`docs/switcher/nord-ikev2-setup.md`](docs/switcher/nord-ikev2-setup.md).
+Full runbook: [`docs/switcher/nord-ikev2-setup.md`](switcher/nord-ikev2-setup.md).
 Four human steps, summarized:
 
 1. **Get the IKEv2 server hostname** from Nord Account > Advanced settings >
@@ -116,7 +118,7 @@ Use exactly these two names, exactly these two modes. **Do not use mode
 "Toggle"** for either — `vpn-ctl.sh` needs one-directional, idempotent
 actions. Until both shortcuts exist, `vpn-ctl.sh nord on|off` exits **3**,
 and the app's NordVPN toggle surfaces that same message instead of doing
-anything. Full detail: [`docs/switcher/nord-ikev2-setup.md`](docs/switcher/nord-ikev2-setup.md#shortcuts-for-nordvpn-control).
+anything. Full detail: [`docs/switcher/nord-ikev2-setup.md`](switcher/nord-ikev2-setup.md#shortcuts-for-nordvpn-control).
 
 ### (d) Install VPN Switch
 
@@ -130,7 +132,7 @@ Support/vpn-switch/{bin,lib,config}/` (no sudo), and copies the app to
 `/Applications/VPN Switch.app`. Safe to re-run. Re-run this after editing
 `config/lan-hosts.conf` so the installed copy the app and `vpn-ctl.sh` use
 stays in sync (`dns-config-1ww`) — see "Add a host" in
-[`docs/hostnames/lan-dns.md`](docs/hostnames/lan-dns.md).
+[`docs/hostnames/lan-dns.md`](hostnames/lan-dns.md).
 
 The app is ad-hoc signed, so Gatekeeper may warn on first launch ("cannot be
 opened because the developer cannot be verified"). Either right-click the
@@ -168,7 +170,7 @@ not add `local` back. The NordVPN IKEv2 profile generated in step
 was generated before this step existed, regenerate it
 (`bash bin/nord-ikev2-profile.sh`) and reinstall it via System Settings so
 bare names also expand while the IKEv2 tunnel is primary. Full detail:
-[`docs/hostnames/lan-dns.md`](docs/hostnames/lan-dns.md).
+[`docs/hostnames/lan-dns.md`](hostnames/lan-dns.md).
 
 ## 4. Daily use
 
@@ -324,7 +326,7 @@ One-shot, read-only full capture of DNS/network state to
   (`dns-config-qsk.10`) is a Tailscale restart under a live IKEv2 tunnel,
   not a sleep/wake cycle. Sleep/wake, Nord reconnect, and a longer soak are
   covered by `dns-config-qsk.11`; see
-  [`docs/switcher/nord-ikev2-results.md`](docs/switcher/nord-ikev2-results.md)
+  [`docs/switcher/nord-ikev2-results.md`](switcher/nord-ikev2-results.md)
   for what is and is not measured.
 - **Nord programmatic on/off is now measured.** The two Shortcuts
   ("NordVPN On"/"NordVPN Off", Section 3(c)) exist on this Mac, and NordVPN
@@ -332,7 +334,7 @@ One-shot, read-only full capture of DNS/network state to
   end to end: 2026-08-17, `nord off` +0 s, `nord on` +3 s, both leaving
   `dns-verify.sh` 6/6 afterward (see the L3/L4 rows and "Transition
   latency" in
-  [`docs/verification-results.md`](docs/verification-results.md)). **Still
+  [`docs/verification-results.md`](verification-results.md)). **Still
   never measured** (see the NOT TESTED rows there): NordVPN toggled via the
   NordVPN app itself (as opposed to the IKEv2 profile/Shortcuts); the
   Nord-app-tunnel-present recovery test (connecting the app's own tunnel by
