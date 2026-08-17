@@ -16,7 +16,8 @@ the one thing that must stay disconnected (its tunnel collides with
 Tailscale). Use either:
 
 - **VPN Switch** (menu bar) → click **NordVPN**. *Requires the two Shortcuts
-  below to exist; until then the toggle shows a message telling you so.*
+  (Section 3(c)); if they do not exist yet, the toggle shows a message
+  telling you so.*
 - **System Settings → VPN → NordVPN IKEv2 → toggle.**
 
 **How do I turn Tailscale on or off?** VPN Switch → **Tailscale**, or the
@@ -156,8 +157,13 @@ sudo mkdir -p /etc/resolver && printf 'nameserver 127.0.0.1\nport 5354\n' | sudo
 sudo networksetup -setsearchdomains "Wi-Fi" <existing search domains…> home.arpa
 ```
 
-Copy the second command exactly as printed (it includes this machine's
-existing search domain list). The NordVPN IKEv2 profile generated in step
+Copy the second command exactly as printed. That command **replaces** the
+search domain list with `home.arpa` plus whatever else is already
+configured — except `local`, which the script deliberately drops if
+present (measured 2026-08-17: `local` as a search suffix makes bare names
+wait on mDNS timing — up to ~5 s — before falling through to `home.arpa`
+when this service is primary; see `docs/adr-003-lan-fallback.md` §1). Do
+not add `local` back. The NordVPN IKEv2 profile generated in step
 (b) already carries `home.arpa` in its `DNS.SearchDomains` — if that profile
 was generated before this step existed, regenerate it
 (`bash bin/nord-ikev2-profile.sh`) and reinstall it via System Settings so
@@ -294,6 +300,7 @@ One-shot, read-only full capture of DNS/network state to
 | Bare name resolves to a LAN IP away from home / connection refused | Tailscale is off away from home — there is no path to the LAN IP | Turn Tailscale on; there is no design that has a correct answer for away + Tailscale off (ADR-003) |
 | Bare name gives the previous answer for a few seconds after toggling Tailscale from its own menu | Resolver cache until the app/vpn-ctl re-syncs dnsmasq's hosts file (`dns-config-qsk.12`) | `bash bin/vpn-ctl.sh lan-dns sync` |
 | Bare name fails with Tailscale off at home | dnsmasq not answering, or the search suffix isn't reaching the resolver | `bash bin/vpn-ctl.sh lan-dns status` (if not `answering`, run `bash bin/lan-dns-install.sh`); check `/etc/resolver/home.arpa` exists; check `scutil <<<'show State:/Network/Global/DNS'` — `SearchDomains` should contain `home.arpa` (if Nord IKEv2 is up and it doesn't, the profile predates the DNS block — regenerate with `bin/nord-ikev2-profile.sh` and reinstall) |
+| Bare name takes ~5 s / no answer with both VPNs off, but `.home.arpa` is instant | `local` in the Wi-Fi search list (ahead of `home.arpa`) — bare names try `.local` mDNS first and wait ~5 s before falling through | `sudo networksetup -setsearchdomains "Wi-Fi" home.arpa` |
 
 ## 7. Tradeoffs and known limitations
 
@@ -319,14 +326,18 @@ One-shot, read-only full capture of DNS/network state to
   covered by `dns-config-qsk.11`; see
   [`docs/switcher/nord-ikev2-results.md`](docs/switcher/nord-ikev2-results.md)
   for what is and is not measured.
-- **Never measured (see the NOT TESTED rows in
-  [`docs/verification-results.md`](docs/verification-results.md)):** NordVPN
-  IKEv2 turned on/off *programmatically* (the two Shortcuts do not exist
-  yet, so the app's NordVPN toggle and `vpn-ctl.sh nord on|off` are
-  unverified end to end); NordVPN toggled via the NordVPN app; away/hotspot
-  networks (any row); sleep/wake. The Nord-off rows that *are* recorded (L3
-  names-only, L4) come from a single ~15-minute window in which the profile
-  reinstall had dropped the tunnel.
+- **Nord programmatic on/off is now measured.** The two Shortcuts
+  ("NordVPN On"/"NordVPN Off", Section 3(c)) exist on this Mac, and NordVPN
+  on/off via `vpn-ctl.sh` (the app's exact code path) is verified
+  end to end: 2026-08-17, `nord off` +0 s, `nord on` +3 s, both leaving
+  `dns-verify.sh` 6/6 afterward (see the L3/L4 rows and "Transition
+  latency" in
+  [`docs/verification-results.md`](docs/verification-results.md)). **Still
+  never measured** (see the NOT TESTED rows there): NordVPN toggled via the
+  NordVPN app itself (as opposed to the IKEv2 profile/Shortcuts); the
+  Nord-app-tunnel-present recovery test (connecting the app's own tunnel by
+  hand and confirming detection/fix); away/hotspot networks (any row);
+  sleep/wake.
 - **Phones are unaffected by this fix.** iOS/Android allow only one VPN
   active at a time at the OS level — a standalone NordVPN client and
   Tailscale cannot coexist on a phone under any configuration.

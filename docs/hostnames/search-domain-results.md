@@ -1,5 +1,29 @@
 # 'local' search-domain approach — measurements (bead dns-config-j9y.1)
 
+## Correction (2026-08-17)
+
+The verdict below — **NOT VIABLE**, `local` cannot make bare names work —
+still stands. But the mechanism given for it was wrong. State B here was
+measured with **NordVPN IKEv2 primary**, in which case Wi-Fi's whole search
+list (including `local`) is inert — nothing on Wi-Fi's list is consulted
+while a VPN service is primary (see `dns-config-j9y.3`). It was never that
+macOS "excludes `local` from search-path synthesis"; `local` was simply not
+in the effective list macOS applied.
+
+Re-measured 2026-08-17 with **both VPNs off** (Wi-Fi primary), effective
+search list `local home.arpa`: macOS *does* apply `local` as a search
+suffix in this state, and it is actively harmful, not merely inert. Bare
+`streamy` tried `streamy.local` first; the Synology's mDNS answered only
+after ~5.3 s; the lookup gave up (no answer, 5.05 s per lookup) before ever
+falling through to `home.arpa`. Bare `mac-mini` appeared to work only
+because that host's mDNS answers in 0.06 s — a fast-mDNS coincidence, not
+evidence `local` was harmless. `streamy.home.arpa` resolved directly in
+0.04 s throughout. Removing `local` from the Wi-Fi search list (`sudo
+networksetup -setsearchdomains Wi-Fi home.arpa`) fixed it: both bare names
+resolved to LAN IPs in 0.04 s, `dns-verify.sh` 6/6. See
+`dns-config-qsk.8` (2026-08-17 comment) for the full numbers and
+`snapshots/ts-off-nord-off.txt` for the captured state.
+
 Date: 2026-08-16 ~23:10. Home LAN, en0 (Wi-Fi) 192.0.2.64. NordVPN IKEv2
 up throughout (Nord-off rows NOT MEASURED — the two Shortcuts do not exist
 yet; irrelevant to the verdict, see below). Tailscale toggled via

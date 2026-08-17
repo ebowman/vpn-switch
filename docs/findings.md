@@ -425,11 +425,24 @@ comments, which ADR-002 cites figure by figure.
   `SearchDomains` was moved inside the VPN profile's own `DNS` payload
   dictionary, which macOS 26 does honour for a personal, non-MDM IKEv2
   profile. See `docs/hostnames/search-domain-results.md` and ADR-003 §2a.
-- **`local` is excluded from search-path synthesis entirely** — it is the
-  Bonjour registration/browsing zone (`dns-sd -E` / `dns-sd -F`), not a
-  usable unicast search suffix, so setting it as a search domain never
-  causes `<name>` to be tried as `<name>.local`; only a real mDNS query
-  (e.g. typing `streamy.local` directly) uses it.
+- **`local` is *not* excluded from search-path synthesis in general — that
+  earlier claim only held while a VPN was primary.** `dns-sd -E` / `dns-sd
+  -F` do list `local` as the Bonjour registration/browsing zone, and while
+  a VPN service is primary (Wi-Fi's search list inert, per the bullet
+  above) setting `local` as a search domain indeed never causes `<name>` to
+  be tried as `<name>.local`. **Correction (2026-08-17):** when Wi-Fi
+  itself is primary (both VPNs off), macOS *does* apply `local` as a search
+  suffix — and it is actively harmful, not merely inert. With the effective
+  list `local home.arpa`, bare `streamy` tried `streamy.local` first; the
+  Synology's mDNS answered only after ~5.3 s; the lookup gave up (no
+  answer, 5.05 s per lookup) before ever falling through to `home.arpa`.
+  Bare `mac-mini` only appeared to work because that host's mDNS
+  answers in 0.06 s — a fast-mDNS coincidence, not evidence `local` is
+  safe. Removing `local` from the Wi-Fi search list fixed it: both bare
+  names resolved via `home.arpa` in 0.04 s. Decision: `local` must never be
+  in the search list, in any state — see `dns-config-g3u`,
+  `docs/adr-003-lan-fallback.md` §1, and
+  `docs/hostnames/search-domain-results.md`.
 
 ### Process
 

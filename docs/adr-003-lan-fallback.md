@@ -20,11 +20,21 @@ domain**. Tailscale supplies one; nothing else does.
 
 Measured before deciding (`docs/hostnames/search-domain-results.md`):
 
-- Adding `local` as a search domain does **nothing**. With Tailscale off and
-  `local` the only search entry, bare `streamy` returns no answer in ~10 ms
-  — not the LAN address, and not the ~10 s an attempted mDNS query costs
-  when a host is absent. `dns-sd -E/-F` show `local` is the Bonjour
-  registration/browsing zone; macOS excludes it from search-path synthesis.
+- Adding `local` as a search domain does **nothing** — *while a VPN is
+  primary* (that was the state under test here: Tailscale off, Nord IKEv2
+  on). With Tailscale off and `local` the only search entry, bare `streamy`
+  returns no answer in ~10 ms — not the LAN address, and not the ~10 s an
+  attempted mDNS query costs when a host is absent. `dns-sd -E/-F` show
+  `local` is the Bonjour registration/browsing zone; macOS excludes it from
+  search-path synthesis while a VPN service is primary.
+  **Correction (2026-08-17):** when Wi-Fi is primary instead (both VPNs
+  off), macOS *does* apply `local` as a search suffix, and it is actively
+  harmful: with the effective list `local home.arpa`, bare `streamy` tried
+  `streamy.local` first, the Synology's mDNS answered only after ~5.3 s, and
+  the lookup gave up (no answer, 5.05 s per lookup) before ever trying
+  `home.arpa`. Removing `local` from the Wi-Fi search list fixed it: bare
+  `streamy` → 192.0.2.4 in 0.04 s. Decision: `local` must not be in the
+  search list, in any state.
 - A *unicast* search domain **is** applied to bare names — that is exactly
   how `tailXXXX.ts.net` works today (bare `phone`, no mDNS,
   resolves in 30 ms with Tailscale up).
@@ -50,7 +60,9 @@ suffix a search domain.**
   longest-suffix specificity before any `order` value (source-code evidence
   on `dns-config-c15.3`).
 - Search domain: `home.arpa` added to the Wi-Fi (and any other active)
-  service's search list, *after* whatever is already there.
+  service's search list, excluding `local` if present (2026-08-17: `local`
+  as a search suffix is harmful when that service is primary — see §1
+  correction).
 
 Root is needed **twice, once, at install** (writing `/etc/resolver/home.arpa`;
 `networksetup -setsearchdomains`) and never at runtime. The install script
@@ -122,7 +134,7 @@ Revised expected behaviour:
 | Tailscale on, Nord IKEv2 on | 100.64.10.4 | `tailXXXX.ts.net` (Tailscale) or `home.arpa` (Nord profile) — order irrelevant | MagicDNS or dnsmasq (tailnet IP either way) |
 | Tailscale on, Nord off | 100.64.10.4 | `tailXXXX.ts.net` or `home.arpa` (Wi-Fi) | same |
 | Tailscale off, Nord IKEv2 on | 192.0.2.4 | `home.arpa` (Nord profile) | dnsmasq, LAN IP |
-| Tailscale off, Nord off | 192.0.2.4 | `home.arpa` (Wi-Fi) | dnsmasq, LAN IP |
+| Tailscale off, Nord off | 192.0.2.4 | `home.arpa` (Wi-Fi; `local` removed) | dnsmasq, LAN IP |
 | Away, Tailscale on | 100.64.10.4 | as above | tailnet IP — reachable |
 | Away, Tailscale off | 192.0.2.4 (unreachable) | — | no correct answer exists |
 

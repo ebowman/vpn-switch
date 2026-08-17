@@ -14,9 +14,9 @@ Columns: `dns-verify` = `bin/dns-verify.sh` summary; `WEB` = HTTPS fetch
 | 1 | on | on | 6 passed, 0 failed, 0 skipped | ok(200) | 100.64.10.4 / 100.64.10.65 | **PASS** — the normal state | `snapshots/ts-on-nordikev2-on.txt`; `snapshots/soak-both-up-30min.log`; qsk.10 |
 | 2 | on | off | 4 FAIL (names/services), 2 SKIP (staleness) — as designed | ok(200) via Nord | no answer (expected) | **PASS per ADR-002** — internet via Nord, tailnet unavailable | `snapshots/ts-off-nordikev2-on.txt`; `snapshots/qsk8-ts-off.log` |
 | 3 | off | on | 6 passed (measured 2026-08-15/16 before IKEv2 was connected; state identical: no Nord tunnel) | ok(200) | 100.64.10.4 / 100.64.10.65 | **PASS** | `snapshots/ts-on-nord-off.txt`; qsk.1 round-trips |
-| 4 | off | off | — | — | — | **NOT TESTED** — requires Nord IKEv2 off; gated on the two Shortcuts (or a manual toggle in System Settings > VPN) | — |
+| 4 | off | off | — | — | — | **SUPERSEDED** — see LAN fallback row "L4 (re-measured)" below (2026-08-17, via the app/Shortcuts) | — |
 | A1 | on | on → off → on | Stopped in 3 s, Running in 2 s via the **installed app's menu**; WEB ok throughout | ok(200) | restored | **PASS** — transitions through the app | `snapshots/qsk8-ts-off.log`, `snapshots/qsk8-ts-on.log` (qsk.8) |
-| A2 | on → off / off → on via app | on | — | — | — | **NOT TESTED** — Nord toggle needs the two Shortcuts; app shows the exit-3 message until then (verified) | qsk.5/qsk.6 review |
+| A2 | on → off / off → on via app | on | — | — | — | **SUPERSEDED** — see "Transition latency" under LAN fallback below (2026-08-17: measured via `vpn-ctl.sh`/Shortcuts, rows L3/L4) | qsk.8 comment 2026-08-17 |
 | E1 | app tunnel present (simulated) | on | collision row FAILs; app shows ⚠︎ App tunnel (unsupported) | — | — | **PASS** — error state detected, no auto-fix | c15.8 override test; qsk.6 review |
 | S1 | on | on, 30-min soak @2 s | see soak log | all ok(200) except the deliberate A1 window | — | see `snapshots/soak-both-up-30min.log` (qsk.11) | — |
 | — | away (hotspot) rows | | | | | **NOT CAPTURED** — no away network available unattended | — |
@@ -28,10 +28,9 @@ Columns: `dns-verify` = `bin/dns-verify.sh` summary; `WEB` = HTTPS fetch
   on (normal), Tailscale off for a moment, Nord off, and toggling Tailscale
   from the menu bar. All pass, and the one "failure" (row 2's tailnet names)
   is the documented behaviour of not running Tailscale.
-- Row 4 and A2 are the only untested combinations, and both are gated on a
-  single 30-second human step (create the two Shortcuts) — after which
-  `bash bin/vpn-ctl.sh nord off && bash bin/dns-verify.sh` and the app's
-  Nord toggle fill them in.
+- Row 4 and A2 are superseded by the LAN fallback section below, which now
+  has measured rows for both (2026-08-17, via the two Shortcuts and
+  `vpn-ctl.sh`).
 - E1 is the one configuration this whole project exists to prevent (the
   NordVPN app's tunnel alongside Tailscale). It was exercised through the
   detection override rather than by actually connecting the app tunnel,
@@ -55,11 +54,12 @@ the expected behaviour now that the LAN fallback is in place.
 |---|---|---|---|---|---|---|---|---|---|
 | L1 | on | on | `tailXXXX.ts.net home.arpa` (PrimaryInterface ipsec0) | 100.64.10.4 | 100.64.10.65 | 6 passed, 0 failed, 0 skipped (staleness "matches live Tailscale IP") | 200 in 0.28 s | **PASS** | 2026-08-17 ~00:35 and again 2026-08-17 (transition run) |
 | L2 | on | off | `home.arpa` (PrimaryInterface ipsec0) | 192.0.2.4 (dscacheutil wall clock 0.01 s) | 192.0.2.65 (:22 open via bare name) | 6 passed, 0 failed, 0 skipped (State: tailscale=down nordvpn=ikev2(ipsec0) lan-dns=answering; staleness "matches LAN table") | 200 in 0.31 s via Nord | **PASS** | 2026-08-17 ~00:35 and transition run |
-| L3 | off | on | `tailXXXX.ts.net local home.arpa` | 100.64.10.4 (Tailscale's suffix first — tailnet still wins) | not measured in this state | not run in this state | not measured | **PASS (names only: streamy resolves to its tailnet IP; the rest of the row is unmeasured)** | 2026-08-17 ~00:20 (profile reinstall had dropped the IKEv2 tunnel) |
+| L3 | off | on | `tailXXXX.ts.net local home.arpa` | 100.64.10.4 (Tailscale's suffix first — tailnet still wins) | 100.64.10.65 | 6/6 (State: tailscale=up nordvpn=absent lan-dns=answering) | ok(200) 0.13 s | **PASS — full row** | 2026-08-17 18:24 (`nord on→off`, ts on, via `vpn-ctl.sh`; egress 203.0.113.26/ISP) |
 | L4 | off | off | `local home.arpa` (en0 primary) | 192.0.2.4 (0.02–0.05 s, stable across 10 polls over 20 s; :5000 open via bare name) | 192.0.2.65 (:22 open) | 6 passed, 0 failed, 0 skipped (State: tailscale=down nordvpn=absent lan-dns=answering) | not recorded | **PASS** — first time a bare name has ever resolved with Tailscale off on this machine | 2026-08-17 ~00:20 |
+| L4 (re-measured) | off | off | `local home.arpa` → resolver#1 192.0.2.1 (router) | **FAIL with `local` present**: no answer, 5.05 s per lookup (mDNS from Synology answers only after ~5.3 s, too late); **PASS after removing `local`** (`sudo networksetup -setsearchdomains Wi-Fi home.arpa`): 192.0.2.4 in 0.04 s | 192.0.2.65 in 0.06 s even with `local` present (fast mDNS — coincidence, not evidence `local` is safe); 0.04 s after removal | 3 passed/2 failed/1 skipped with `local` present; 6/6 after removal | ok(200) 0.05 s | **FAIL → PASS** (root cause: `local` as a search suffix when Wi-Fi is primary; see ADR-003 §1 correction) | 2026-08-17 18:24; `snapshots/ts-off-nord-off.txt` captured after removal |
 | L5 | any | any | away / hotspot | — | — | — | — | **NOT TESTED** (no away network available unattended); ADR-003 §2a: away+TS-on expected tailnet IPs (dnsmasq serves tailnet IPs while TS is up, so correct regardless of suffix order); away+TS-off has no correct answer by design | — |
 
-Rows L3–L4 were taken during the ~15 min window in which the profile reinstall had dropped the IKEv2 tunnel; the cells marked not measured/not recorded were simply not captured before the tunnel was reconnected, and cannot be re-taken unattended (Nord toggling is gated on the two Shortcuts).
+The original L4 row (and the names-only L3 measurement of 2026-08-17 ~00:20) were taken during the ~15 min window in which the profile reinstall had dropped the IKEv2 tunnel. On 2026-08-17 (afternoon), once the two Shortcuts existed, both states were re-entered via `vpn-ctl.sh` and re-measured — L3 above is now a full row, and L4's re-measurement follows.
 
 ### Transition latency
 
@@ -80,15 +80,27 @@ Measured 2026-08-17, Nord IKEv2 on throughout:
   no cache flush is needed in vpn-ctl; the ~10 s is the worst case after an
   *external* flip (Tailscale menu / GUI) until the app re-syncs — tracked
   as bead dns-config-qsk.12.
-- Nord on/off transitions: **NOT TESTED programmatically** (the two
-  Shortcuts do not exist yet); the human's System Settings toggles
-  produced rows L1–L4.
+- Nord on/off transitions: measured 2026-08-17 18:24 via `bin/vpn-ctl.sh`
+  (the app's exact code path), using the two Shortcuts ('NordVPN On' /
+  'NordVPN Off', README §3(c)), home LAN:
+  - `nord on → off` (ts on): rc 0 at +0 s (shortcut returns immediately;
+    `ipsec0` gone at +3 s). Resulting state (nord off, ts on) is row L3
+    above.
+  - `ts on → off` (nord off): rc 0 at +5 s. Resulting state (off, off) is
+    the L4 re-measurement row above.
+  - `ts off → on` (nord off): rc 0 at +3 s; first probe at +3 s already
+    returned tailnet IPs; SearchDomains `tailXXXX.ts.net home.arpa`.
+  - `nord off → on` (ts on): rc 0 at +3 s; `ipsec0` 10.6.0.41 present;
+    SearchDomains `tailXXXX.ts.net home.arpa`; bare names → tailnet IPs;
+    WEB 200 in 0.21 s; egress 187.40.54.188 (Nord); dns-verify 6/6.
 
 ### Not covered / limits
 
 - Away rows (L5): no away/hotspot network available unattended.
 - Sleep / wake: not exercised in this pass.
-- Nord toggles via the NordVPN app (as opposed to the IKEv2 profile or
-  System Settings): not exercised in this pass.
+- NordVPN app tunnel present alongside Tailscale — the recovery test
+  (connecting Nord's own app tunnel by hand and confirming detection/fix):
+  not exercised in this pass, deliberately (would black-hole DNS
+  unattended; requires the human present).
 - LAN addresses in `config/lan-hosts.conf` can go stale under DHCP
   (ADR-003 §4) — not something this verification pass can detect.

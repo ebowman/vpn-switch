@@ -10,16 +10,17 @@ on this Mac, home LAN). Each cell is the literal observed value.
 | Tailscale off, **Nord IKEv2** on | `ts-off-nordikev2-on.txt` | 2026-08-16 13:0x | `103.86.96.100` (Nord, public) | ikev2(ipsec0) | no answer (expected) | no answer (expected) | 192.0.2.4 | ok |
 | Tailscale off, **Nord APP** on | `ts-off-nord-on.txt` | 2026-08-16 00:39 | `100.64.0.2` (Nord app — inside CGNAT space) | app (pre-detection capture) | no answer (expected) | no answer (expected) | 192.0.2.4 | ok |
 | Tailscale on, **Nord APP** on | *(not captured as a snapshot — see `snapshots/ts-then-nord-2.log`, `openvpn-udp-nord.log`, `custom-dns-nord.log`)* | 2026-08-16 09:26–10:25 | `100.64.0.2` first; MagicDNS never consulted | app | FAIL | FAIL | ok | **FAIL** (total DNS loss; browser dead) — the unsupported state |
-| Tailscale off, Nord off | NOT CAPTURED (no dns-snapshot; Nord IKEv2 off needs a human System Settings toggle) | — | `192.0.2.1` (router) | absent | no answer (pre-ADR-003) → 192.0.2.4 since 2026-08-17 (L4) | no answer (pre-ADR-003) → 192.0.2.65 since 2026-08-17 (L4) | 192.0.2.4 | ok | 
+| Tailscale off, Nord off | `ts-off-nord-off.txt` | 2026-08-17 19:23 | `192.0.2.1` (router; search domain[0] `home.arpa`, `local` removed) | absent | 192.0.2.4 | 192.0.2.65 | 192.0.2.4 | ok |
 | Away (hotspot), any | — | NOT CAPTURED | — | — | — | — | — | — |
 
-The last "off/off" row is the trivial baseline (nothing but the router
-resolver). Its resolver-#1 and bare-name values come from the L4 row of
-`docs/verification-results.md` (2026-08-17 ~00:20; dns-verify 6/6, bare
-names → LAN IPs) and from repeated observation during setup, not from a
-`bin/dns-snapshot.sh` capture; a snapshot can be taken with
-`bash bin/vpn-ctl.sh tailscale off && bash bin/dns-snapshot.sh ts-off-nord-off && bash bin/vpn-ctl.sh tailscale on`
-once Nord can be turned off from the CLI.
+The last "off/off" row is now CAPTURED: `snapshots/ts-off-nord-off.txt`
+(2026-08-17), taken after the `local` search-domain fix (`dns-config-g3u`)
+was applied — resolver #1 is `192.0.2.1` (the router) with search
+domain[0] `home.arpa` (`local` removed from the Wi-Fi search list); bare
+`streamy` → 192.0.2.4 and bare `mac-mini` → 192.0.2.65, both via
+`home.arpa`/dnsmasq. See the L4 "re-measured" row of
+`docs/verification-results.md` for the before/after numbers with and
+without `local` in the search list.
 
 ## What this shows
 
@@ -40,10 +41,18 @@ once Nord can be turned off from the CLI.
 
    **Note, dated 2026-08-17:** since ADR-003 (`docs/adr-003-lan-fallback.md`),
    the "Tailscale off, Nord IKEv2 on" row's bare-name cells above ("no
-   answer (expected)") no longer describe current behaviour, and the
-   "Tailscale off, Nord off" row above has been updated in place to show
-   both the pre-ADR-003 and current values — both states now answer LAN IPs
-   via the dnsmasq/`home.arpa` fallback; see the "LAN fallback" section of
-   `docs/verification-results.md` for the current measurements. The
-   snapshots this table is built from predate ADR-003 and are left as
-   literal, unmodified captures of the state at the time they were taken.
+   answer (expected)") no longer describe current behaviour; both states
+   now answer LAN IPs via the dnsmasq/`home.arpa` fallback; see the "LAN
+   fallback" section of `docs/verification-results.md` for the current
+   measurements. The "Tailscale off, Nord IKEv2 on" row's snapshot predates
+   ADR-003 and is left as a literal, unmodified capture of the state at the
+   time it was taken.
+
+   **Second note, dated 2026-08-17 (later):** the "Tailscale off, Nord off"
+   row was re-captured (`ts-off-nord-off.txt`) after fixing `dns-config-g3u`
+   — the Wi-Fi search list had contained `local` ahead of `home.arpa`,
+   which made bare names wait on mDNS timing (bare `streamy` gave no
+   answer, 5.05 s per lookup, before the fix) rather than resolve via
+   `home.arpa` (0.04 s, after removing `local`). See
+   `docs/verification-results.md`'s L4 "re-measured" row and
+   `docs/adr-003-lan-fallback.md` §1 for the numbers.

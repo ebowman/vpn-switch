@@ -347,6 +347,7 @@ for _svc in ${_services}; do
     [ -n "${_ip}" ] || continue
 
     _current="$(networksetup -getsearchdomains "${_svc}" 2>/dev/null)"
+    _dropped_local=0
     case "${_current}" in
         *"There aren't any"*|"")
             _new_list="home.arpa"
@@ -361,6 +362,14 @@ for _svc in ${_services}; do
                 if [ "${_d}" = "home.arpa" ]; then
                     _already=1
                 fi
+                # 'local' is the mDNS zone: as a search suffix it makes bare
+                # names wait on .local timing when this service is primary
+                # (measured 2026-08-17: ~5.3s mDNS delay before falling
+                # through to home.arpa). Never carry it forward.
+                if [ "${_d}" = "local" ]; then
+                    _dropped_local=1
+                    continue
+                fi
                 if [ -z "${_new_list}" ]; then
                     _new_list="${_d}"
                 else
@@ -373,11 +382,14 @@ for _svc in ${_services}; do
             ;;
     esac
 
-    if [ "${_already}" -eq 1 ]; then
+    if [ "${_already}" -eq 1 ] && [ "${_dropped_local}" -eq 0 ]; then
         echo "    search domains for '${_svc}' (${_dev}, ${_ip}): home.arpa already present -- nothing to do"
     else
         echo "    search domains for '${_svc}' (${_dev}, ${_ip}):"
         echo "        sudo networksetup -setsearchdomains \"${_svc}\" ${_new_list}"
+        if [ "${_dropped_local}" -eq 1 ]; then
+            echo "        # note: dropped 'local' from the list -- it is the mDNS zone; as a search suffix it makes bare names wait on .local timing when this service is primary"
+        fi
         SEARCH_DOMAIN_STEPS_NEEDED=1
     fi
 done
