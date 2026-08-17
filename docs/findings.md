@@ -284,7 +284,27 @@ up, in both Nord-IKEv2-on and Nord-IKEv2-off states, at home. With Tailscale
 off, only `.local` mDNS names work -- this is by design (the tailnet is
 simply unreachable when Tailscale is off) and is exactly the behaviour
 ADR-001/ADR-002 always stated for that scenario, not a regression
-(dns-config-c15, closing comment 2026-08-16 11:20).
+(dns-config-c15, closing comment 2026-08-16 11:20). **This was the state as
+of 2026-08-16 11:20.**
+
+As of 2026-08-17, ADR-003 (`docs/adr-003-lan-fallback.md`) closes that gap.
+A local dnsmasq resolver, authoritative for `home.arpa`, now answers bare
+`streamy` / `mac-mini` with LAN IPs when Tailscale is off at home,
+measured against the four home rows of the "LAN fallback" section of
+`docs/verification-results.md`: **L1** (Tailscale on, Nord IKEv2 on) —
+tailnet IPs (`100.64.10.4` / `100.64.10.65`); **L2** (Tailscale off, Nord
+IKEv2 on) — LAN IPs `192.0.2.4` / `192.0.2.65`, `dns-verify.sh` 6
+passed/0 failed/0 skipped, with the Nord IKEv2 tunnel up; **L4** (Tailscale
+off, Nord off) — the same LAN IPs, `dns-verify.sh` 6 passed/0 failed/0
+skipped, with everything off; **L3** (Nord IKEv2 off, Tailscale on) — names
+only, `streamy` confirmed resolving to its tailnet IP (the rest of that row
+was not measured). Transition latency after a Tailscale toggle via
+`vpn-ctl.sh`: +4 s off, +1 s on, correct on the first probe both times. Two
+limits remain: away from home with Tailscale off has no correct answer by
+design (the LAN IP dnsmasq serves is unreachable off the LAN), and a
+Tailscale flip made *outside* `vpn-ctl.sh` (the Tailscale app's own menu)
+can leave a bare name serving the previous answer for up to ~10 s until the
+next re-sync (`dns-config-qsk.12`).
 
 The decision record is `docs/adr-002-nordvpn-ikev2.md` (committed
 `19eca80`), which supersedes ADR-001; ADR-001's "Superseded" banner and its
@@ -393,6 +413,23 @@ comments, which ADR-002 cites figure by figure.
   same vendor's IKEv2 servers, which push an entirely different, documented,
   out-of-CGNAT resolver, sidestepped the whole problem without needing any
   local workaround at all (dns-config-qsk.10, comment 2026-08-16 11:15).
+- **`State:/Network/Global/DNS`'s `SearchDomains` is not "every service's
+  search list."** It is only the **primary** network service's own search
+  domains, plus any NetworkExtension **supplemental match** domains (how
+  Tailscale's suffix always applies regardless of which service is
+  primary). A search domain set on a non-primary service — e.g. Wi-Fi's
+  list while the Nord IKEv2 tunnel is primary — is inert: it never reaches
+  the list macOS actually consults for unqualified names. This is why the
+  `local` search domain (`dns-config-j9y.1`) did nothing, and why the first
+  `home.arpa` attempt (added only to Wi-Fi) also did nothing until
+  `SearchDomains` was moved inside the VPN profile's own `DNS` payload
+  dictionary, which macOS 26 does honour for a personal, non-MDM IKEv2
+  profile. See `docs/hostnames/search-domain-results.md` and ADR-003 §2a.
+- **`local` is excluded from search-path synthesis entirely** — it is the
+  Bonjour registration/browsing zone (`dns-sd -E` / `dns-sd -F`), not a
+  usable unicast search suffix, so setting it as a search domain never
+  causes `<name>` to be tried as `<name>.local`; only a real mDNS query
+  (e.g. typing `streamy.local` directly) uses it.
 
 ### Process
 

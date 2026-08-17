@@ -33,3 +33,12 @@ it needs no evidence beyond `scutil --dns` on any Mac with both VPNs off.
    `.local` names still work via mDNS — as ADR-001/ADR-002 both state.
    Not a regression; the switcher's job is to make turning Tailscale back
    on one click.
+
+   **Note, dated 2026-08-17:** since ADR-003 (`docs/adr-003-lan-fallback.md`),
+   the "Tailscale off, Nord IKEv2 on" and "Tailscale off, Nord off" rows'
+   bare-name cells above ("no answer (expected)") no longer describe current
+   behaviour — those two states now answer LAN IPs via the dnsmasq/`home.arpa`
+   fallback; see the "LAN fallback" section of `docs/verification-results.md`
+   for the current measurements. The snapshots this table is built from
+   predate ADR-003 and are left as literal, unmodified captures of the state
+   at the time they were taken.

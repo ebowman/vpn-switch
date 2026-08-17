@@ -58,7 +58,8 @@ API alone. Full story: [`docs/findings.md`](docs/findings.md). Decision:
 | Tailscale | **Standalone build** (not the Mac App Store build) | Sandboxed MAS build has no `tailscale` CLI on PATH and withholds most config surface; the standalone build is needed for the real CLI (`dns-config-p6t`). |
 | NordVPN | **Native IKEv2 configuration profile** — NOT the NordVPN app's own tunnel | The app's tunnel is the source of the `100.64.0.2` collision (Section 1). The app may stay installed, but its tunnel must never be connected at the same time as Tailscale — see Section 6. |
 | VPN Switch | Menu bar app (`app/VPNSwitch/`), SwiftUI `MenuBarExtra` | Independent status + toggles for both, driving `bin/vpn-ctl.sh`. |
-| Scripts | `bin/vpn-ctl.sh`, `bin/dns-verify.sh`, `bin/dns-watch.sh`, `bin/dns-snapshot.sh`, `bin/nord-ikev2-profile.sh`, `lib/*.sh` | Control and verification, all read-only except `vpn-ctl.sh`'s toggles; see each script's own header for its contract. |
+| LAN DNS (dnsmasq) | **User** LaunchAgent, `dnsmasq` bound to `127.0.0.1:5354`, authoritative for `home.arpa` | Bare `streamy` / `mac-mini` resolve to LAN IPs at home when Tailscale is off, instead of returning no answer — [`docs/adr-003-lan-fallback.md`](docs/adr-003-lan-fallback.md). |
+| Scripts | `bin/vpn-ctl.sh`, `bin/dns-verify.sh`, `bin/dns-watch.sh`, `bin/dns-snapshot.sh`, `bin/nord-ikev2-profile.sh`, `bin/lan-dns-install.sh`, `bin/lan-dns-uninstall.sh`, `lib/*.sh` (incl. `lib/lan-dns.sh`, `lib/lan-hosts.sh`) | Control and verification, all read-only except `vpn-ctl.sh`'s toggles and the LAN DNS install/uninstall pair; see each script's own header for its contract. |
 
 ## 3. Setting up a fresh Mac
 
@@ -83,7 +84,14 @@ Four human steps, summarized:
 3. **Run the generator**: `bash bin/nord-ikev2-profile.sh` with
    `NORD_IKEV2_SERVER` / `NORD_IKEV2_USER` / `NORD_IKEV2_PASS` (or
    `NORD_IKEV2_ENVFILE` pointing at a mode-600 file) set. It only writes a
-   `.mobileconfig` file outside this repo — it never installs anything.
+   `.mobileconfig` file outside this repo — it never installs anything. The
+   generator now also writes a DNS dictionary into the profile
+   (`ServerAddresses` `103.86.96.100`/`103.86.99.100`, `SearchDomains`
+   `home.arpa`) — controlled by the `NORD_IKEV2_DNS_SERVERS` and
+   `NORD_IKEV2_SEARCH_DOMAINS` env vars (defaults shown above; set
+   `NORD_IKEV2_SEARCH_DOMAINS=""` to disable the DNS dict entirely) — needed
+   for LAN DNS bare-name expansion while the IKEv2 tunnel is primary; see
+   step (e) below.
 4. **Install it** via System Settings: open the generated file (Finder
    double-click or `open`), then approve it under **System Settings > Privacy
    & Security > Profiles**.
@@ -129,6 +137,29 @@ directly: `xattr -dr com.apple.quarantine "/Applications/VPN Switch.app"`.
 Login Items). Only enabled when running from `/Applications` — if disabled,
 it shows "Install to /Applications first".
 
+### (e) LAN DNS for bare names with Tailscale off
+
+```
+bash bin/lan-dns-install.sh
+```
+
+Installs dnsmasq (Homebrew) as a user LaunchAgent and renders the initial
+`home.arpa` hosts file — no sudo. It then prints two one-time commands for a
+human to run:
+
+```
+sudo mkdir -p /etc/resolver && printf 'nameserver 127.0.0.1\nport 5354\n' | sudo tee /etc/resolver/home.arpa
+sudo networksetup -setsearchdomains "Wi-Fi" <existing search domains…> home.arpa
+```
+
+Copy the second command exactly as printed (it includes this machine's
+existing search domain list). The NordVPN IKEv2 profile generated in step
+(b) already carries `home.arpa` in its `DNS.SearchDomains` — if that profile
+was generated before this step existed, regenerate it
+(`bash bin/nord-ikev2-profile.sh`) and reinstall it via System Settings so
+bare names also expand while the IKEv2 tunnel is primary. Full detail:
+[`docs/hostnames/lan-dns.md`](docs/hostnames/lan-dns.md).
+
 ## 4. Daily use
 
 Two independent toggles in the VPN Switch menu: **NordVPN** and
@@ -158,6 +189,16 @@ app's tunnel; do not leave it running alongside Tailscale.
 log in for you — it shows an **"Open Tailscale…"** menu item that opens the
 Tailscale app so you can log in yourself.
 
+**Bare names in every state.** `streamy` / `mac-mini` resolve to their
+tailnet IPs while Tailscale is up, and to their LAN IPs while it is off at
+home (ADR-003's LAN fallback, via dnsmasq/`home.arpa`). `streamy.home.arpa`
+also works explicitly in any state. Worst case, after a Tailscale flip done
+*outside* vpn-ctl (the Tailscale app's own menu rather than VPN Switch), a
+bare name can serve the previous answer for up to ~10 s until the next
+re-sync (`dns-config-qsk.12`); toggling via VPN Switch/`vpn-ctl.sh` measured
+no such lag (+4 s to switch off, +1 s to switch back on, correct on the
+first probe both times).
+
 ## 5. Verifying
 
 ```
@@ -165,13 +206,23 @@ bash bin/dns-verify.sh
 ```
 
 Runs a read-only PASS/FAIL/SKIP check table and a leading `State:` line
-(`tailscale=<state> nordvpn=<mode> home-lan=<state>`, where `nordvpn` is
-`ikev2` | `app` | `app+ikev2` | `absent`). Six checks in the healthy case (per
+(`tailscale=<state> nordvpn=<mode> home-lan=<state> lan-dns=<state>`, where
+`nordvpn` is `ikev2` | `app` | `app+ikev2` | `absent` and `lan-dns` is
+`answering` | `not-answering` | `not-installed` — whether the dnsmasq
+LaunchAgent itself is up and responding). Six checks in the healthy case (per
 `docs/switcher/nord-ikev2-results.md`, §2: `bin/dns-verify.sh` → "6 passed, 0
 failed, 0 skipped"): name resolution for both hosts, service reachability for
 both (`streamy:5000/5001`, `mac-mini:22`), and staleness (resolved IPs
-match the live Tailscale address). An additional check fires only if the
-NordVPN app-tunnel/Tailscale collision is detected, and counts as a FAIL.
+match the live Tailscale address when Tailscale is up, or `config/lan-hosts.conf`'s
+LAN column when it is off). An additional check fires only if the NordVPN
+app-tunnel/Tailscale collision is detected, and counts as a FAIL.
+
+```
+bash bin/vpn-ctl.sh lan-dns status
+```
+
+Reports the same `lan-dns=` state on its own, standalone from the full
+`dns-verify.sh` run.
 
 ```
 bash bin/vpn-ctl.sh status
@@ -224,6 +275,9 @@ One-shot, read-only full capture of DNS/network state to
 | `dns-verify.sh` reports `nordvpn=absent` while NordVPN is actually up | Stale/older script not using the shared detector | Update to the current `bin/dns-verify.sh` — detection keys on `ipsec0` presence and `103.86.x` resolvers |
 | IKEv2 fails to connect | Service credentials expired/rotated, or CA trust issue | Regenerate the profile with fresh service credentials (Section 3(b), step 2-3); confirm the embedded CA in `config/nord-ikev2/nordvpn-root.der` is still valid |
 | Tailscale IP of `streamy`/`mac-mini` changed | Real drift | `dns-verify.sh`'s staleness check catches this — it FAILs and names the mismatch |
+| Bare name resolves to a LAN IP away from home / connection refused | Tailscale is off away from home — there is no path to the LAN IP | Turn Tailscale on; there is no design that has a correct answer for away + Tailscale off (ADR-003) |
+| Bare name gives the previous answer for a few seconds after toggling Tailscale from its own menu | Resolver cache until the app/vpn-ctl re-syncs dnsmasq's hosts file (`dns-config-qsk.12`) | `bash bin/vpn-ctl.sh lan-dns sync` |
+| Bare name fails with Tailscale off at home | dnsmasq not answering, or the search suffix isn't reaching the resolver | `bash bin/vpn-ctl.sh lan-dns status` (if not `answering`, run `bash bin/lan-dns-install.sh`); check `/etc/resolver/home.arpa` exists; check `scutil <<<'show State:/Network/Global/DNS'` — `SearchDomains` should contain `home.arpa` (if Nord IKEv2 is up and it doesn't, the profile predates the DNS block — regenerate with `bin/nord-ikev2-profile.sh` and reinstall) |
 
 ## 7. Tradeoffs and known limitations
 
@@ -257,6 +311,17 @@ One-shot, read-only full capture of DNS/network state to
   scripts the NordVPN app itself.
 - **Notifications need a signed app for authorization.** The current ad-hoc
   build degrades silently (no prompt, no notifications) rather than erroring.
+- **One more user-level daemon (dnsmasq) to keep alive** for the LAN DNS
+  fallback (ADR-003) — `bin/vpn-ctl.sh lan-dns status` / `dns-verify.sh`'s
+  `lan-dns=` token report whether it is answering.
+- **LAN addresses in `config/lan-hosts.conf` can go stale under DHCP** —
+  use DHCP reservations or static addresses for hosts listed there.
+- **Away from home with Tailscale off has no correct answer by design** —
+  the LAN IP dnsmasq serves is unreachable off the LAN; there is no
+  design that fixes this state (ADR-003).
+- **Two one-time sudo steps at LAN DNS install** (`/etc/resolver/home.arpa`,
+  `networksetup -setsearchdomains`) — the only root steps anywhere in this
+  project.
 
 ## 8. Uninstall / undo everything
 
@@ -284,20 +349,49 @@ To remove the rest by hand:
   (`this-mac-userspace`, an old `this-mac`) registered in the Tailscale admin
   console — optional cleanup, tracked as `dns-config-r5b`.
 
+To remove the LAN DNS fallback (ADR-003):
+
+```
+bash bin/lan-dns-uninstall.sh
+```
+
+Unloads the dnsmasq LaunchAgent and removes the generated dnsmasq
+config/logs, the rendered hosts file, and the pid file — no sudo. It
+deliberately leaves `config/lan-hosts.conf` (repo source) and does not run
+`brew uninstall dnsmasq` in place. It then prints, but does not run, the
+matching root-level undo:
+
+```
+sudo rm /etc/resolver/home.arpa
+sudo networksetup -setsearchdomains "Wi-Fi" <remaining search domains…>
+```
+
+(the second command reflects each active network service's search domain
+list with `home.arpa` removed). Optionally, `brew uninstall dnsmasq` if
+nothing else on the machine uses it. If you also want to remove the
+`DNS.SearchDomains` key from the NordVPN IKEv2 profile, regenerate it with
+`NORD_IKEV2_SEARCH_DOMAINS=""` and reinstall.
+
 ## 9. Repo map
 
 - `bin/` — entry-point scripts: `vpn-ctl.sh` (control), `dns-verify.sh`
   (one-shot check), `dns-watch.sh` (polling capture), `dns-snapshot.sh`
   (one-shot capture), `nord-ikev2-profile.sh` (profile generator),
-  `install-vpn-switch.sh` / `uninstall-vpn-switch.sh`.
+  `install-vpn-switch.sh` / `uninstall-vpn-switch.sh`,
+  `lan-dns-install.sh` / `lan-dns-uninstall.sh` (ADR-003 LAN DNS fallback).
 - `lib/` — shared, sourceable logic: `nord-ctl.sh`, `nord-detect.sh`,
-  `tailscale-ctl.sh`.
+  `tailscale-ctl.sh`, `lan-dns.sh` (dnsmasq LaunchAgent status/sync),
+  `lan-hosts.sh` (renders `config/lan-hosts.conf` into dnsmasq's hosts file).
 - `app/` — the VPN Switch SwiftUI menu bar app (`app/VPNSwitch/`).
+- `config/lan-hosts.conf` — source of LAN/tailnet addresses for the LAN DNS
+  fallback (ADR-003); one line per host.
 - `docs/` — `adr-001-hostname-resolution.md` (superseded by ADR-002, kept for
   its corrected-mechanism appendix), `adr-002-nordvpn-ikev2.md` (current
-  decision), `findings.md` (full narrative), `research/` (background:
-  technical, community reports, vendor positions), `switcher/` (design and
-  setup docs for the IKEv2 profile, Tailscale control, and the app).
+  decision), `adr-003-lan-fallback.md` (LAN DNS fallback for Tailscale-off),
+  `findings.md` (full narrative), `research/` (background: technical,
+  community reports, vendor positions), `switcher/` (design and setup docs
+  for the IKEv2 profile, Tailscale control, and the app), `hostnames/`
+  (LAN DNS design/measurements: `lan-dns.md`, `search-domain-results.md`).
 - `snapshots/` — evidence captures. Filenames are labels; `dns-watch.sh`
   refuses to overwrite an existing one.
 - `config/nord-ikev2/` — the NordVPN IKEv2 root CA only (public, safe to
