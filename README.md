@@ -313,12 +313,20 @@ One-shot, read-only full capture of DNS/network state to
 - **Profile is user-scoped and invisible to `scutil --nc`** — by design of
   NetworkExtension's separate config store, not a bug; control goes through
   Shortcuts instead.
-- **Sleep/wake and long-term durability are only partially measured.** A
-  Tailscale restart under a live IKEv2 tunnel was tested and held (12/12
-  samples, 60s soak, `dns-config-qsk.10`). Sleep/wake, Nord reconnect, and a
-  longer soak are covered by `dns-config-qsk.11`; see
+- **Sleep/wake was NOT exercised.** The 12/12, 60s-soak result
+  (`dns-config-qsk.10`) is a Tailscale restart under a live IKEv2 tunnel,
+  not a sleep/wake cycle. Sleep/wake, Nord reconnect, and a longer soak are
+  covered by `dns-config-qsk.11`; see
   [`docs/switcher/nord-ikev2-results.md`](docs/switcher/nord-ikev2-results.md)
   for what is and is not measured.
+- **Never measured (see the NOT TESTED rows in
+  [`docs/verification-results.md`](docs/verification-results.md)):** NordVPN
+  IKEv2 turned on/off *programmatically* (the two Shortcuts do not exist
+  yet, so the app's NordVPN toggle and `vpn-ctl.sh nord on|off` are
+  unverified end to end); NordVPN toggled via the NordVPN app; away/hotspot
+  networks (any row); sleep/wake. The Nord-off rows that *are* recorded (L3
+  names-only, L4) come from a single ~15-minute window in which the profile
+  reinstall had dropped the tunnel.
 - **Phones are unaffected by this fix.** iOS/Android allow only one VPN
   active at a time at the OS level — a standalone NordVPN client and
   Tailscale cannot coexist on a phone under any configuration.
