@@ -36,3 +36,59 @@ Columns: `dns-verify` = `bin/dns-verify.sh` summary; `WEB` = HTTPS fetch
   NordVPN app's tunnel alongside Tailscale). It was exercised through the
   detection override rather than by actually connecting the app tunnel,
   because doing so black-holes DNS on the machine and it was unattended.
+- Rows 2 and 4 above are superseded by the LAN fallback section below — see
+  that section for the current (post-ADR-003) verdicts for those states.
+
+## LAN fallback (bead dns-config-j9y.4)
+
+After ADR-003 (`docs/adr-003-lan-fallback.md`, esp. §2a) the bare names
+`streamy` / `mac-mini` are expected to resolve to tailnet IPs
+(100.64.10.4 / 100.64.10.65) while Tailscale is up, and to LAN IPs
+(192.0.2.4 / 192.0.2.65) while it is down, via dnsmasq on
+`127.0.0.1:5354` for `home.arpa`, `/etc/resolver/home.arpa`, and a
+`home.arpa` search suffix (added to the Wi-Fi service and to the Nord
+IKEv2 profile's `DNS.SearchDomains`). This section supersedes rows 2 and 4
+of the IKEv2-era table above — row 2's "no answer (expected)" is no longer
+the expected behaviour now that the LAN fallback is in place.
+
+| Row | nord (IKEv2) | tailscale | Global SearchDomains (State:/Network/Global/DNS) | bare streamy → | bare mac-mini → | dns-verify | WEB | Verdict | Measured |
+|---|---|---|---|---|---|---|---|---|---|
+| L1 | on | on | `tailXXXX.ts.net home.arpa` (PrimaryInterface ipsec0) | 100.64.10.4 | 100.64.10.65 | 6 passed, 0 failed, 0 skipped (staleness "matches live Tailscale IP") | 200 in 0.28 s | **PASS** | 2026-08-17 ~00:35 and again 2026-08-17 (transition run) |
+| L2 | on | off | `home.arpa` (PrimaryInterface ipsec0) | 192.0.2.4 (dscacheutil wall clock 0.01 s) | 192.0.2.65 (:22 open via bare name) | 6 passed, 0 failed, 0 skipped (State: tailscale=down nordvpn=ikev2(ipsec0) lan-dns=answering; staleness "matches LAN table") | 200 in 0.31 s via Nord | **PASS** | 2026-08-17 ~00:35 and transition run |
+| L3 | off | on | `tailXXXX.ts.net local home.arpa` | 100.64.10.4 (Tailscale's suffix first — tailnet still wins) | not measured in this state | not run in this state | not measured | **PASS (names only: streamy resolves to its tailnet IP; the rest of the row is unmeasured)** | 2026-08-17 ~00:20 (profile reinstall had dropped the IKEv2 tunnel) |
+| L4 | off | off | `local home.arpa` (en0 primary) | 192.0.2.4 (0.02–0.05 s, stable across 10 polls over 20 s; :5000 open via bare name) | 192.0.2.65 (:22 open) | 6 passed, 0 failed, 0 skipped (State: tailscale=down nordvpn=absent lan-dns=answering) | not recorded | **PASS** — first time a bare name has ever resolved with Tailscale off on this machine | 2026-08-17 ~00:20 |
+| L5 | any | any | away / hotspot | — | — | — | — | **NOT TESTED** (no away network available unattended); ADR-003 §2a: away+TS-on expected tailnet IPs (dnsmasq serves tailnet IPs while TS is up, so correct regardless of suffix order); away+TS-off has no correct answer by design | — |
+
+Rows L3–L4 were taken during the ~15 min window in which the profile reinstall had dropped the IKEv2 tunnel; the cells marked not measured/not recorded were simply not captured before the tunnel was reconnected, and cannot be re-taken unattended (Nord toggling is gated on the two Shortcuts).
+
+### Transition latency
+
+Measured 2026-08-17, Nord IKEv2 on throughout:
+
+- `bin/vpn-ctl.sh tailscale off`: rc 0, returned at +4 s (its own ts wait +
+  `lan_dns_sync`); the first probe at +4 s already returned
+  streamy=192.0.2.4, mac-mini=192.0.2.65. Global SearchDomains
+  had become `[home.arpa]`.
+- `bin/vpn-ctl.sh tailscale on`: rc 0 at +1 s; first probe at +1 s returned
+  the tailnet IPs; SearchDomains `[tailXXXX.ts.net, home.arpa]`.
+- Earlier the same night (bead dns-config-j9y.3, flips done by hand in the
+  GUI, probe taken inside the window) a one-off ~10 s stale answer was
+  observed after a flip (mDNSResponder cache); `dscacheutil -flushcache`
+  did not shorten it; `sudo killall -HUP mDNSResponder` would, but no
+  script runs it. With vpn-ctl sequencing (wait for Tailscale state, then
+  re-render dnsmasq's hosts file + SIGHUP) no lag was measurable. Finding:
+  no cache flush is needed in vpn-ctl; the ~10 s is the worst case after an
+  *external* flip (Tailscale menu / GUI) until the app re-syncs — tracked
+  as bead dns-config-qsk.12.
+- Nord on/off transitions: **NOT TESTED programmatically** (the two
+  Shortcuts do not exist yet); the human's System Settings toggles
+  produced rows L1–L4.
+
+### Not covered / limits
+
+- Away rows (L5): no away/hotspot network available unattended.
+- Sleep / wake: not exercised in this pass.
+- Nord toggles via the NordVPN app (as opposed to the IKEv2 profile or
+  System Settings): not exercised in this pass.
+- LAN addresses in `config/lan-hosts.conf` can go stale under DHCP
+  (ADR-003 §4) — not something this verification pass can detect.
