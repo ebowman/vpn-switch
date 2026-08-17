@@ -129,6 +129,9 @@ LAN column when down — and reports "matches live Tailscale IP" /
 2. Re-run `bin/lan-dns-install.sh` (regenerates dnsmasq's config and the
    hosts file, reloads the LaunchAgent; the root steps and the Nord profile
    reinstall do not need to be repeated).
+3. Also re-run `bash bin/install-vpn-switch.sh` (refreshes the installed copy
+   at `~/Library/Application Support/vpn-switch/config/lan-hosts.conf`, which
+   is what the installed `vpn-ctl.sh`/app actually read — `dns-config-1ww`).
 
 ## Undo
 

@@ -9,6 +9,9 @@
 #   - /Applications/VPN Switch.app
 #   - "$HOME/Library/Application Support/vpn-switch/bin"
 #   - "$HOME/Library/Application Support/vpn-switch/lib"
+#   - "$HOME/Library/Application Support/vpn-switch/config"
+#     (installed copy of config/lan-hosts.conf -- dns-config-1ww; the repo's
+#     own config/ is never touched, only this installed sibling of bin/lib)
 #   - the login item registration (SMAppService), via the app binary's own
 #     --unregister-login-item flag, run before the app is deleted
 #   - the ie.boboco.vpnswitch UserDefaults domain (best-effort)
@@ -43,6 +46,7 @@ APP_BINARY="${APP_DEST}/Contents/MacOS/VPNSwitch"
 INSTALL_ROOT="${HOME}/Library/Application Support/vpn-switch"
 BIN_DIR="${INSTALL_ROOT}/bin"
 LIB_DIR="${INSTALL_ROOT}/lib"
+CONFIG_DIR="${INSTALL_ROOT}/config"
 BUNDLE_ID="ie.boboco.vpnswitch"
 
 echo "=== VPN Switch uninstall ==="
@@ -119,6 +123,16 @@ if [ -d "${LIB_DIR}" ]; then
     fi
 else
     echo "    not present: ${LIB_DIR}"
+fi
+if [ -d "${CONFIG_DIR}" ]; then
+    if rm -rf "${CONFIG_DIR}"; then
+        echo "    removed ${CONFIG_DIR}"
+    else
+        echo "uninstall-vpn-switch: failed to remove ${CONFIG_DIR}" >&2
+        exit 1
+    fi
+else
+    echo "    not present: ${CONFIG_DIR}"
 fi
 echo
 

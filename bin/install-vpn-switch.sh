@@ -15,6 +15,12 @@
 #     (vpn-ctl.sh resolves its libs as "<its own dir>/../lib/*.sh" -- the
 #     case-guard repo-root pattern -- so bin/ and lib/ are installed as
 #     siblings under .../vpn-switch/, matching that layout exactly.)
+#   - config/lan-hosts.conf                       -> "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf"
+#     (lib/lan-hosts.sh resolves LAN_HOSTS_CONF as "<its own dir>/../config/lan-hosts.conf",
+#     so config/ is installed as a sibling of bin/ and lib/, matching that
+#     layout exactly -- dns-config-1ww. Only lan-hosts.conf is copied, never
+#     the rest of config/ (e.g. config/nord-ikev2/), which is out of scope
+#     for this installed layout.)
 #
 # INSTALL_PREFIX=/usr/local is an OPT-IN alternative install location for the
 # scripts (NOT the app, which always goes to /Applications). It requires
@@ -54,6 +60,7 @@ INSTALL_PREFIX="${INSTALL_PREFIX:-}"
 DEFAULT_INSTALL_ROOT="${HOME}/Library/Application Support/vpn-switch"
 DEFAULT_BIN_DIR="${DEFAULT_INSTALL_ROOT}/bin"
 DEFAULT_LIB_DIR="${DEFAULT_INSTALL_ROOT}/lib"
+DEFAULT_CONFIG_DIR="${DEFAULT_INSTALL_ROOT}/config"
 
 echo "=== VPN Switch install ==="
 echo
@@ -82,9 +89,11 @@ echo "==> [2/4] Installing control scripts"
 install_scripts_to() {
     _bin_dir="$1"
     _lib_dir="$2"
+    _config_dir="$3"
 
     echo "    bin: ${_bin_dir}"
     echo "    lib: ${_lib_dir}"
+    echo "    config: ${_config_dir}"
 
     if ! mkdir -p "${_bin_dir}"; then
         echo "install-vpn-switch: could not create ${_bin_dir}" >&2
@@ -92,6 +101,10 @@ install_scripts_to() {
     fi
     if ! mkdir -p "${_lib_dir}"; then
         echo "install-vpn-switch: could not create ${_lib_dir}" >&2
+        return 1
+    fi
+    if ! mkdir -p "${_config_dir}"; then
+        echo "install-vpn-switch: could not create ${_config_dir}" >&2
         return 1
     fi
 
@@ -114,6 +127,13 @@ install_scripts_to() {
         echo "    installed ${_lib_base}"
     done
     [ "${_lib_ok}" = "1" ] || return 1
+
+    if ! cp "${REPO_ROOT}/config/lan-hosts.conf" "${_config_dir}/lan-hosts.conf"; then
+        echo "install-vpn-switch: failed to copy lan-hosts.conf" >&2
+        return 1
+    fi
+    echo "    installed lan-hosts.conf"
+
     return 0
 }
 
@@ -122,26 +142,29 @@ if [ -n "${INSTALL_PREFIX}" ]; then
     echo "    INSTALL_PREFIX=${INSTALL_PREFIX} set -- opt-in system-wide install requested."
     echo "    This script does NOT run sudo. Run these commands yourself:"
     echo
-    echo "        sudo mkdir -p '${INSTALL_PREFIX}/bin' '${INSTALL_PREFIX}/lib'"
+    echo "        sudo mkdir -p '${INSTALL_PREFIX}/bin' '${INSTALL_PREFIX}/lib' '${INSTALL_PREFIX}/config'"
     echo "        sudo cp '${REPO_ROOT}/bin/vpn-ctl.sh' '${INSTALL_PREFIX}/bin/vpn-ctl.sh'"
     for _lib_file in "${REPO_ROOT}"/lib/*.sh; do
         [ -e "${_lib_file}" ] || continue
         _lib_base="${_lib_file##*/}"
         echo "        sudo cp '${_lib_file}' '${INSTALL_PREFIX}/lib/${_lib_base}'"
     done
+    echo "        sudo cp '${REPO_ROOT}/config/lan-hosts.conf' '${INSTALL_PREFIX}/config/lan-hosts.conf'"
     echo "        sudo chmod +x '${INSTALL_PREFIX}/bin/vpn-ctl.sh' '${INSTALL_PREFIX}/lib/'*.sh"
     echo
-    echo "    NOTE: vpn-ctl.sh resolves its libs as '<its own dir>/../lib/*.sh',"
-    echo "    so under INSTALL_PREFIX the layout must be '\${INSTALL_PREFIX}/bin/vpn-ctl.sh'"
-    echo "    and '\${INSTALL_PREFIX}/lib/*.sh' as siblings of 'bin/' -- adjust the"
-    echo "    mkdir path above if your INSTALL_PREFIX layout differs."
+    echo "    NOTE: vpn-ctl.sh resolves its libs as '<its own dir>/../lib/*.sh', and"
+    echo "    lib/lan-hosts.sh resolves its conf as '<its own dir>/../config/lan-hosts.conf',"
+    echo "    so under INSTALL_PREFIX the layout must be '\${INSTALL_PREFIX}/bin/vpn-ctl.sh',"
+    echo "    '\${INSTALL_PREFIX}/lib/*.sh', and '\${INSTALL_PREFIX}/config/lan-hosts.conf' as"
+    echo "    siblings of 'bin/' -- adjust the mkdir path above if your INSTALL_PREFIX"
+    echo "    layout differs."
     echo
     echo "    This script is still installing the no-sudo default location below"
     echo "    so the app has something to run against right away."
     echo
 fi
 
-if ! install_scripts_to "${DEFAULT_BIN_DIR}" "${DEFAULT_LIB_DIR}"; then
+if ! install_scripts_to "${DEFAULT_BIN_DIR}" "${DEFAULT_LIB_DIR}" "${DEFAULT_CONFIG_DIR}"; then
     echo "install-vpn-switch: failed to install control scripts" >&2
     exit 1
 fi
@@ -192,6 +215,7 @@ echo "Installed:"
 echo "  App:          ${APP_DEST}"
 echo "  vpn-ctl.sh:   ${DEFAULT_BIN_DIR}/vpn-ctl.sh"
 echo "  libs:         ${DEFAULT_LIB_DIR}/"
+echo "  config:       ${DEFAULT_CONFIG_DIR}/lan-hosts.conf"
 echo
 echo "Not touched: the IKEv2 profile (*.mobileconfig), NordVPN credentials, Shortcuts.app."
 echo

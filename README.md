@@ -123,9 +123,13 @@ anything. Full detail: [`docs/switcher/nord-ikev2-setup.md`](docs/switcher/nord-
 bash bin/install-vpn-switch.sh
 ```
 
-Builds the app, installs `vpn-ctl.sh` and its libs to `~/Library/Application
-Support/vpn-switch/{bin,lib}/` (no sudo), and copies the app to
-`/Applications/VPN Switch.app`. Safe to re-run.
+Builds the app, installs `vpn-ctl.sh`, its libs, and a copy of
+`config/lan-hosts.conf` to `~/Library/Application
+Support/vpn-switch/{bin,lib,config}/` (no sudo), and copies the app to
+`/Applications/VPN Switch.app`. Safe to re-run. Re-run this after editing
+`config/lan-hosts.conf` so the installed copy the app and `vpn-ctl.sh` use
+stays in sync (`dns-config-1ww`) — see "Add a host" in
+[`docs/hostnames/lan-dns.md`](docs/hostnames/lan-dns.md).
 
 The app is ad-hoc signed, so Gatekeeper may warn on first launch ("cannot be
 opened because the developer cannot be verified"). Either right-click the
@@ -330,7 +334,7 @@ bash bin/uninstall-vpn-switch.sh
 ```
 
 Quits the app, unregisters the login item, and removes `/Applications/VPN
-Switch.app` and the installed `bin/`/`lib/` scripts. Deliberately leaves
+Switch.app` and the installed `bin/`/`lib/`/`config/` scripts. Deliberately leaves
 behind (and prints a note about) the IKEv2 profile and any
 `.mobileconfig`/`.env` files under `~/Library/Application
 Support/vpn-switch/` — **this includes NordVPN service credentials**, so
