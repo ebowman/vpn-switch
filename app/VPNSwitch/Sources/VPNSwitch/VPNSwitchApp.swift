@@ -154,6 +154,15 @@ struct MenuContentView: View {
             }
             .disabled(model.isSwitching)
 
+            // Disabled when a toggle is already in flight (same guard as
+            // the two toggles above), or when there is nothing on to turn
+            // off (both Nord and Tailscale already report off) -- avoids
+            // an always-live "off" action that would just re-run a no-op.
+            Button("Turn All VPNs Off") {
+                model.turnAllOff()
+            }
+            .disabled(model.isSwitching || (!model.status.nord.isOn && !model.status.ts.isOn))
+
             Divider()
 
             Button("Refresh") {

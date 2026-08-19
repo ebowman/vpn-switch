@@ -157,6 +157,14 @@ final class AppModel: ObservableObject {
         runToggle(args: ["tailscale", target])
     }
 
+    /// Turns both NordVPN and Tailscale off via `vpn-ctl.sh all off`. Given
+    /// a longer timeout than the default toggle: `all off` runs two
+    /// sequential waits of up to VPN_CTL_WAIT_TIMEOUT (45s) each plus web
+    /// checks, so it can exceed the default 60s.
+    func turnAllOff() {
+        runToggle(args: ["all", "off"], timeout: 120)
+    }
+
     /// Opens the Tailscale app (used by the "Open Tailscale…" menu item
     /// shown when ts=NeedsLogin). Does not attempt to drive any login flow
     /// itself -- that's left entirely to the human via the Tailscale app.
@@ -189,14 +197,18 @@ final class AppModel: ObservableObject {
         loginItemRegistered = LoginItem.isRegistered
     }
 
-    private func runToggle(args: [String]) {
+    private func runToggle(args: [String], timeout: TimeInterval = 60) {
         guard !isSwitching else { return }
         isSwitching = true
         selfInitiatedChangeInFlight = true
         headerMessage = nil
         Task.detached { [weak self] in
-            let outcome = VPNCtl.run(args)
-            let toggleFailed = await self?.apply(outcome: outcome, actionDescription: args.joined(separator: " ")) ?? false
+            let outcome = VPNCtl.run(args, timeout: timeout)
+            let toggleFailed = await self?.apply(
+                outcome: outcome,
+                actionDescription: args.joined(separator: " "),
+                timeout: timeout
+            ) ?? false
             let messageToPreserve = toggleFailed ? await self?.headerMessage ?? nil : nil
             // Re-run status regardless of outcome, per spec: "re-run status".
             // If the toggle itself failed, preserve its error message in the
@@ -223,7 +235,8 @@ final class AppModel: ObservableObject {
         outcome: Result<VPNCtlResult, VPNCtlError>,
         actionDescription: String,
         clearSwitching: Bool = false,
-        preserveMessageOnSuccess: String? = nil
+        preserveMessageOnSuccess: String? = nil,
+        timeout: TimeInterval = 60
     ) -> Bool {
         var failed = false
         let previousStatus = status
@@ -246,7 +259,7 @@ final class AppModel: ObservableObject {
                 status = VPNStatus()
             }
             if result.timedOut {
-                headerMessage = "\(actionDescription) timed out after 60s"
+                headerMessage = "\(actionDescription) timed out after \(Int(timeout))s"
                 failed = true
             } else if result.exitCode != 0 {
                 headerMessage = result.lastMessageLine ?? "\(actionDescription) failed (exit \(result.exitCode))"
