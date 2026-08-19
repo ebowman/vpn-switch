@@ -23,7 +23,9 @@ Nord's IKEv2 servers push a documented resolver (`103.86.96.100` /
 `103.86.99.100`) and a `10.6.x` tunnel address, both outside
 `100.64.0.0/10`. There is nothing for Tailscale's route to capture, and the
 two coexist. **VPN Switch**, a menu bar app, gives
-independent on/off control of each VPN. A local dnsmasq resolver for the
+independent on/off control of each VPN, plus a single "Turn All VPNs Off"
+item (`vpn-ctl.sh all off` on the CLI) to bring both down at once. A local
+dnsmasq resolver for the
 `home.arpa` suffix makes bare LAN hostnames (`streamy`, not
 `streamy.tail...ts.net`) resolve correctly whether Tailscale is on or off.
 Full reasoning: [ADR-002](docs/adr-002-nordvpn-ikev2.md) (the IKEv2 switch)

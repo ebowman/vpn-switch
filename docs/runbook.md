@@ -178,6 +178,13 @@ Two independent toggles in the VPN Switch menu: **NordVPN** and
 **Tailscale**. Toggling one never implicitly touches the other — coexistence
 is the normal, supported state.
 
+**Turn All VPNs Off** brings both down in one click: NordVPN first, then
+Tailscale. The Tailscale disconnect always runs, even if the NordVPN
+disconnect fails, so a Nord failure never leaves Tailscale stranded up. The
+menu item is disabled while a switch is already in flight, or when neither
+VPN is currently on (nothing to do). CLI equivalent:
+`bash bin/vpn-ctl.sh all off`.
+
 Menu bar icon (SF Symbol, from `app/VPNSwitch/Sources/VPNSwitch/MenuIcon.swift`):
 
 ```
@@ -284,6 +291,11 @@ One-shot, read-only full capture of DNS/network state to
 | 4 | Deadlock guard: NordVPN app tunnel detected, refusing to start Tailscale |
 | 5 | Usage error (bad/missing subcommand or action) |
 | 6 | Another `vpn-ctl.sh` invocation holds the lock |
+
+For `all off`, the exit code is the first non-zero of (nord off, tailscale
+off) — 0 only if both succeeded — and on failure a one-line summary is
+printed to stderr naming which component(s) failed
+(`vpn-ctl: all off: nord=<ok|failed (exit N)> tailscale=<ok|failed (exit N)>`).
 
 ## 6. Troubleshooting
 
