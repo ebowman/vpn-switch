@@ -7,6 +7,7 @@
 #   bin/vpn-ctl.sh nord on|off|status
 #   bin/vpn-ctl.sh tailscale on|off|status
 #   bin/vpn-ctl.sh lan-dns sync|status
+#   bin/vpn-ctl.sh all off
 #   bin/vpn-ctl.sh status
 #
 # 'status' (bare, or either subcommand's 'status' action) prints ONE
@@ -56,6 +57,11 @@
 #     profile this script controls), 'tailscale on' refuses to run at all
 #     (exit 4) because the app's tunnel's 100.64.0.2 resolver collides with
 #     Tailscale's own 100.64/10 range (see dns-config-qsk.10 / c15.8).
+#   - 'all off' runs nord off then tailscale off sequentially, under a
+#     single lock acquisition: tailscale off ALWAYS runs, even if nord off
+#     fails, so a Nord failure never leaves Tailscale up. Its exit code is
+#     the first non-zero of {nord off, tailscale off} (nord-first), or 0 if
+#     both succeed.
 #
 # Exit codes:
 #   0  requested state verified (or already in it — no-op)
@@ -348,6 +354,45 @@ do_tailscale_off() {
     return 0
 }
 
+# do_all_off — composite: bring both Nord and Tailscale down. Runs
+# do_tailscale_off UNCONDITIONALLY even if do_nord_off fails, so a Nord
+# failure never leaves Tailscale up. On any failure, prints one summary
+# line to stderr (the app surfaces the last non-empty stderr line on
+# failure). Does not add its own status line: do_tailscale_off's final
+# status line is already the last stdout status line.
+do_all_off() {
+    local nord_rc ts_rc
+
+    do_nord_off
+    nord_rc=$?
+
+    do_tailscale_off
+    ts_rc=$?
+
+    if [ "${nord_rc}" -ne 0 ] || [ "${ts_rc}" -ne 0 ]; then
+        local nord_summary ts_summary
+        if [ "${nord_rc}" -eq 0 ]; then
+            nord_summary="ok"
+        else
+            nord_summary="failed (exit ${nord_rc})"
+        fi
+        if [ "${ts_rc}" -eq 0 ]; then
+            ts_summary="ok"
+        else
+            ts_summary="failed (exit ${ts_rc})"
+        fi
+        echo "vpn-ctl: all off: nord=${nord_summary} tailscale=${ts_summary}" >&2
+    fi
+
+    if [ "${nord_rc}" -ne 0 ]; then
+        return "${nord_rc}"
+    fi
+    if [ "${ts_rc}" -ne 0 ]; then
+        return "${ts_rc}"
+    fi
+    return 0
+}
+
 # do_lan_dns_sync — standalone 'lan-dns sync' subcommand: re-render the
 # state-dependent home.arpa hosts file from current reality (ts_state) and
 # HUP dnsmasq. See lib/lan-dns.sh's lan_dns_sync. Exists for callers that
@@ -378,6 +423,7 @@ Usage:
   vpn-ctl.sh nord on|off|status
   vpn-ctl.sh tailscale on|off|status
   vpn-ctl.sh lan-dns sync|status
+  vpn-ctl.sh all off
   vpn-ctl.sh status
 EOF
 }
@@ -439,6 +485,15 @@ main() {
                     ;;
             esac
             ;;
+        all)
+            case "${action}" in
+                off) ;; # fall through to locked section below
+                *)
+                    usage
+                    return 5
+                    ;;
+            esac
+            ;;
         *)
             usage
             return 5
@@ -458,6 +513,7 @@ main() {
         tailscale:on)  do_tailscale_on;  rc=$? ;;
         tailscale:off) do_tailscale_off; rc=$? ;;
         lan-dns:sync)  do_lan_dns_sync;  rc=$? ;;
+        all:off)       do_all_off;       rc=$? ;;
         *)
             usage
             rc=5
