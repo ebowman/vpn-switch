@@ -42,6 +42,7 @@ VOLUME_NAME="VPN Switch"
 
 STAGING_DIR=""
 MOUNT_POINT=""
+PLIST_TMP=""
 
 cleanup() {
     # Detach unconditionally when a mount point was recorded, tolerating
@@ -56,6 +57,9 @@ cleanup() {
     fi
     if [ -n "${STAGING_DIR}" ] && [ -d "${STAGING_DIR}" ]; then
         rm -rf "${STAGING_DIR}"
+    fi
+    if [ -n "${PLIST_TMP}" ] && [ -f "${PLIST_TMP}" ]; then
+        rm -f "${PLIST_TMP}"
     fi
 }
 trap cleanup EXIT
@@ -118,6 +122,61 @@ hdiutil create \
     -format UDZO \
     -ov \
     "${DMG_PATH}"
+
+echo "==> Verifying ${DMG_NAME} contents before signing..."
+PLIST_TMP="$(mktemp "${TMPDIR:-/tmp}/vpnswitch-dmg-verify.XXXXXX.plist")"
+if ! hdiutil attach -nobrowse -readonly -noverify -plist "${DMG_PATH}" > "${PLIST_TMP}"; then
+    echo "error: hdiutil attach failed while verifying ${DMG_PATH}" >&2
+    exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: python3 not found; cannot safely parse hdiutil plist to verify the DMG" >&2
+    exit 1
+fi
+
+MOUNT_POINT="$(python3 -c '
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    data = plistlib.load(f)
+
+for entity in data.get("system-entities", []):
+    mount_point = entity.get("mount-point")
+    if mount_point:
+        print(mount_point)
+        break
+' "${PLIST_TMP}")"
+
+if [ -z "${MOUNT_POINT}" ]; then
+    echo "error: could not determine mount point from hdiutil plist while verifying ${DMG_PATH}" >&2
+    exit 1
+fi
+echo "    mounted at ${MOUNT_POINT}"
+
+if [ ! -d "${MOUNT_POINT}/${STAGED_APP_NAME}" ]; then
+    echo "error: ${STAGED_APP_NAME} not found inside mounted DMG at ${MOUNT_POINT}" >&2
+    exit 1
+fi
+echo "    [ok] ${STAGED_APP_NAME} present in mounted DMG"
+
+if [ ! -L "${MOUNT_POINT}/Applications" ]; then
+    echo "error: /Applications symlink not found inside mounted DMG at ${MOUNT_POINT}" >&2
+    exit 1
+fi
+echo "    [ok] /Applications symlink present in mounted DMG"
+
+if ! codesign --verify --deep --strict "${MOUNT_POINT}/${STAGED_APP_NAME}"; then
+    echo "error: codesign verification failed for ${MOUNT_POINT}/${STAGED_APP_NAME}" >&2
+    exit 1
+fi
+echo "    [ok] codesign --verify --deep --strict passed for ${STAGED_APP_NAME}"
+
+if ! hdiutil detach "${MOUNT_POINT}" -quiet; then
+    hdiutil detach "${MOUNT_POINT}" -quiet -force 2>/dev/null || true
+fi
+MOUNT_POINT=""
 
 if [ "${CODESIGN_IDENTITY}" = "-" ]; then
     echo "==> Ad-hoc code-signing ${DMG_NAME} (ALLOW_ADHOC_DMG=1; local testing only)..."
