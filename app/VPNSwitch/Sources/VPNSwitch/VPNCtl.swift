@@ -2,6 +2,7 @@ import Foundation
 #if canImport(Darwin)
 import Darwin
 #endif
+import os
 
 /// Result of running vpn-ctl.sh: exit code plus captured output.
 struct VPNCtlResult {
@@ -44,6 +45,56 @@ enum VPNCtlError: Error {
 /// kill(-pid, SIGKILL) -- so a hung grandchild cannot outlive the timeout.
 enum VPNCtl {
     static let userDefaultsKey = "vpnCtlPath"
+
+    private static let logger = Logger(subsystem: "com.vpnswitch", category: "vpn-ctl")
+
+    /// Fixed PATH handed to every vpn-ctl.sh child process. Deliberately
+    /// excludes Homebrew's prefixes (/opt/homebrew/bin, /usr/local/... via
+    /// brew, etc.): on this machine /opt/homebrew/bin and
+    /// /opt/homebrew/sbin are group-admin writable, so a bare tool name
+    /// (e.g. a dropped `timeout`) resolved via an inherited PATH could run
+    /// with the app's identity on every toggle. Only the fixed system
+    /// directories plus /usr/local/bin (needed for the Tailscale CLI) are
+    /// included; lib/*.sh and bin/vpn-ctl.sh call every other tool by
+    /// absolute path regardless.
+    static let childPATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin"
+
+    /// Builds the environment passed to the vpn-ctl.sh child process from
+    /// the parent (app) environment, allowlisting only a small set of keys.
+    ///
+    /// WHY an allowlist rather than passing the parent environment through
+    /// verbatim: PATH is inherited from the login session and could include
+    /// group-writable directories (see `childPATH`'s doc comment) that let
+    /// a same-user dropped binary hijack a bare tool invocation. Beyond
+    /// PATH, environment variables the scripts themselves read as
+    /// overrides for security-relevant binaries or behavior (TS_CTL_BIN,
+    /// NORD_*, VPN_CTL_*, LAN_DNS_*, DYLD_*, etc.) would let any same-user
+    /// process that can set the app's environment (or influence a launch
+    /// context) redirect which binaries/paths vpn-ctl.sh and its libs
+    /// actually run. Dropping everything except a minimal, inert set of
+    /// locale/identity variables removes that whole class of override.
+    ///
+    /// PATH is always set to `childPATH`, regardless of what (if anything)
+    /// the parent had. HOME, USER, LOGNAME, TMPDIR, LANG, LC_ALL, and
+    /// LC_CTYPE are copied through only when present in `parent` -- they
+    /// are needed for the scripts to resolve `$HOME`-relative paths and
+    /// behave correctly under the user's locale, and carry no meaningful
+    /// override risk.
+    nonisolated static func childEnvironment(from parent: [String: String]) -> [String: String] {
+        var env: [String: String] = ["PATH": childPATH]
+        let passthroughKeys = ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"]
+        for key in passthroughKeys {
+            if let value = parent[key] {
+                env[key] = value
+            }
+        }
+        return env
+    }
+
+    /// Ensures the "resolved to a non-default vpn-ctl.sh path" warning is
+    /// logged at most once per process, no matter how many times `run` is
+    /// called.
+    private static let nonDefaultPathWarned = ThreadSafeBox(false)
 
     /// Registry of currently-spawned child pids (each its own process-group
     /// leader per POSIX_SPAWN_SETSID below), so the app's Quit path can
@@ -100,18 +151,37 @@ enum VPNCtl {
         if let configured = UserDefaults.standard.string(forKey: userDefaultsKey),
            !configured.isEmpty,
            FileManager.default.isExecutableFile(atPath: configured) {
+            warnIfNonDefaultPath(configured)
             return configured
         }
         if FileManager.default.isExecutableFile(atPath: defaultPath) {
             return defaultPath
         }
         if FileManager.default.isExecutableFile(atPath: optInSystemPath) {
+            warnIfNonDefaultPath(optInSystemPath)
             return optInSystemPath
         }
         if FileManager.default.isExecutableFile(atPath: fallbackPath) {
+            warnIfNonDefaultPath(fallbackPath)
             return fallbackPath
         }
         return nil
+    }
+
+    /// Logs a one-time-per-process warning when the resolved vpn-ctl.sh
+    /// path is not the standard `defaultPath` install location -- i.e. the
+    /// UserDefaults override or the opt-in/fallback paths are in play.
+    /// Both the UserDefaults override and the ~/src fallback are same-user
+    /// writable, so this is purely observability (surfaced in Console.app
+    /// via the os.Logger subsystem), not an enforcement mechanism.
+    private static func warnIfNonDefaultPath(_ path: String) {
+        var alreadyWarned = false
+        nonDefaultPathWarned.mutate { warned in
+            alreadyWarned = warned
+            warned = true
+        }
+        guard !alreadyWarned else { return }
+        logger.warning("vpn-ctl resolved to non-default path \(path, privacy: .public)")
     }
 
     /// The path that would be reported to the user when nothing resolves --
@@ -171,7 +241,7 @@ enum VPNCtl {
         var cArgs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
         cArgs.append(nil)
 
-        var envp: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment.map { key, value in
+        var envp: [UnsafeMutablePointer<CChar>?] = childEnvironment(from: ProcessInfo.processInfo.environment).map { key, value in
             strdup("\(key)=\(value)")
         }
         envp.append(nil)

@@ -118,7 +118,7 @@ _lan_dns_pid() {
 
     local gui_domain
     gui_domain="gui/$(id -u)"
-    pid="$(launchctl print "${gui_domain}/${LAN_DNS_LAUNCH_AGENT_LABEL}" 2>/dev/null | awk -F' = ' '/^[[:space:]]*pid = /{print $2; exit}')"
+    pid="$(/bin/launchctl print "${gui_domain}/${LAN_DNS_LAUNCH_AGENT_LABEL}" 2>/dev/null | /usr/bin/awk -F' = ' '/^[[:space:]]*pid = /{print $2; exit}')"
     case "${pid}" in
         ''|*[!0-9]*) printf '' ; return 1 ;;
     esac
@@ -149,19 +149,20 @@ _lan_dns_hup() {
 # Peer[].HostName case-insensitively), or nothing if unavailable (CLI
 # missing/failed, or no matching peer with a TailscaleIPs entry). Bounded by
 # TS_CTL_BIN/TS_CTL_CALL_TIMEOUT from lib/tailscale-ctl.sh if that library is
-# loaded; otherwise falls back to a plain 'tailscale' on PATH, unbounded.
+# loaded. TS_CTL_BIN defaults to the absolute path /usr/local/bin/tailscale
+# (see lib/tailscale-ctl.sh); there is deliberately no PATH-based fallback
+# to a bare 'tailscale' here -- resolving a bare tool name via PATH is the
+# same hijack risk this whole bead (dns-config-ci5) removes elsewhere, so if
+# TS_CTL_BIN isn't set to a usable executable this returns unavailable
+# rather than searching PATH for a substitute.
 _lan_dns_tailnet_ip_live() {
     local name="${1:-}"
     [ -n "${name}" ] || return 1
 
     local ts_bin json
     ts_bin="${TS_CTL_BIN:-}"
-    if [ -z "${ts_bin}" ] || { ! command -v "${ts_bin}" >/dev/null 2>&1 && [ ! -x "${ts_bin}" ]; }; then
-        if command -v tailscale >/dev/null 2>&1; then
-            ts_bin="tailscale"
-        else
-            return 1
-        fi
+    if [ -z "${ts_bin}" ] || [ ! -x "${ts_bin}" ]; then
+        return 1
     fi
 
     if command -v _ts_ctl_run_bounded >/dev/null 2>&1; then
@@ -177,8 +178,8 @@ _lan_dns_tailnet_ip_live() {
     # TailscaleIPs entry. Self is included too, since a host name could in
     # principle be this machine's own (not expected for streamy/
     # mac-mini, but harmless to support).
-    if command -v python3 >/dev/null 2>&1; then
-        printf '%s' "${json}" | python3 -c '
+    if [ -x /usr/bin/python3 ]; then
+        printf '%s' "${json}" | /usr/bin/python3 -c '
 import json, sys
 name = sys.argv[1].lower()
 try:
@@ -335,7 +336,7 @@ lan_dns_status() {
         return 0
     fi
 
-    if ! command -v dig >/dev/null 2>&1; then
+    if [ ! -x /usr/bin/dig ]; then
         printf 'not-answering\n'
         return 0
     fi
@@ -343,11 +344,11 @@ lan_dns_status() {
     local probe_name="streamy.home.arpa"
     if command -v lan_hosts_names >/dev/null 2>&1; then
         local first_host
-        first_host="$(lan_hosts_names | head -1)"
+        first_host="$(lan_hosts_names | /usr/bin/head -1)"
         [ -n "${first_host}" ] && probe_name="${first_host}.home.arpa"
     fi
 
-    if dig "+time=${LAN_DNS_PROBE_TIMEOUT}" +tries=1 \
+    if /usr/bin/dig "+time=${LAN_DNS_PROBE_TIMEOUT}" +tries=1 \
         "@${LAN_DNS_PROBE_ADDR}" -p "${LAN_DNS_PROBE_PORT}" "${probe_name}" A >/dev/null 2>&1; then
         printf 'answering\n'
     else

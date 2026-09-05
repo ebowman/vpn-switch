@@ -97,28 +97,82 @@ else
     _NORD_CTL_DETECT_AVAILABLE=0
 fi
 
-# Resolve a usable 'timeout' command, same convention as tailscale-ctl.sh.
-_nord_ctl_timeout_cmd() {
-    if command -v timeout >/dev/null 2>&1; then
-        echo "timeout"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        echo "gtimeout"
-    else
-        echo ""
-    fi
-}
+# _vpn_run_bounded <seconds> <cmd...> — pure-shell bounded runner shared by
+# lib/nord-ctl.sh and lib/tailscale-ctl.sh (dns-config-ci5 PART B: macOS has
+# no /usr/bin/timeout, and Homebrew coreutils' gtimeout/timeout live under
+# /opt/homebrew/bin, a group-admin-writable directory on this machine —
+# resolving a bare 'timeout'/'gtimeout' via PATH is itself a hijack risk, so
+# this vendors the bound instead of depending on either). Defined identically
+# in both libs, guarded so sourcing both is harmless regardless of order.
+#
+# Runs "$@" in the background, starts a watchdog subshell that sleeps
+# <seconds> then sends SIGTERM to the command's pid, and waits on the
+# command. Returns 124 (GNU timeout's convention; callers already handle
+# 124) if the watchdog fired before the command exited on its own, otherwise
+# the command's real exit status. The watchdog is always killed and reaped
+# immediately after the command's own `wait` returns, so no stray 'sleep'
+# (or its file descriptors) is left running. stdout/stderr of the COMMAND
+# are inherited directly (not touched by this function), so a caller's own
+# "$(...)" capture works exactly as if the command had been run directly;
+# the WATCHDOG subshell's own stdout/stderr are explicitly redirected to
+# /dev/null so it never holds a caller's command-substitution pipe open
+# (without this, `out="$(_vpn_run_bounded 5 cmd)"` would block until the
+# watchdog itself exits, up to the full timeout, even after `cmd` finished
+# immediately -- measured: turned a 0.37s `vpn-ctl.sh status` into 15.29s).
+#
+# CAUTION: SIGTERM is delivered only to the direct child's pid (the
+# command run as "$@" itself), not to any process group -- a grandchild
+# spawned and detached by that command (e.g. something `tailscale up` or
+# `shortcuts run` forks internally) is NOT signalled by this function and
+# can outlive it. The outer bound for that case is VPNCtl.swift's own
+# process-group timeout/kill (POSIX_SPAWN_SETSID + kill(-pid, ...) after
+# 60s), which this function's per-call timeout is deliberately tighter
+# than but does not replace.
+if ! declare -f _vpn_run_bounded >/dev/null 2>&1; then
+_vpn_run_bounded() {
+    local secs="$1"
+    shift
+    "$@" &
+    local cmd_pid=$!
+    # Flag file the watchdog creates iff it actually fires (i.e. the
+    # command was still alive at the deadline), so the caller below can
+    # distinguish "watchdog killed it" from "command exited on its own"
+    # after both have been waited on. Named with both pids plus $$ so
+    # concurrent _vpn_run_bounded calls (even nested) never collide.
+    local timed_out_flag="${TMPDIR:-/tmp}/.vpn_run_bounded.$$.${cmd_pid}"
+    rm -f "${timed_out_flag}" 2>/dev/null
+    (
+        sleep "${secs}"
+        if kill -0 "${cmd_pid}" 2>/dev/null; then
+            : >"${timed_out_flag}" 2>/dev/null
+            kill -TERM "${cmd_pid}" 2>/dev/null
+        fi
+    ) >/dev/null 2>&1 &
+    local watchdog_pid=$!
 
-# Run "$@" bounded by NORD_CTL_CALL_TIMEOUT seconds if a timeout command is
-# available; otherwise run it unbounded. Returns the wrapped command's exit
-# status (or 124 on timeout, matching GNU timeout's convention).
-_nord_ctl_run_bounded() {
-    local tcmd
-    tcmd="$(_nord_ctl_timeout_cmd)"
-    if [ -n "${tcmd}" ]; then
-        "${tcmd}" "${NORD_CTL_CALL_TIMEOUT}" "$@"
-        return $?
+    local rc
+    wait "${cmd_pid}"
+    rc=$?
+
+    # Watchdog no longer needed: kill and reap it immediately so no stray
+    # sleep (or held-open descriptor) lingers, whether or not it fired.
+    kill -TERM "${watchdog_pid}" 2>/dev/null
+    wait "${watchdog_pid}" 2>/dev/null
+
+    if [ -e "${timed_out_flag}" ]; then
+        rm -f "${timed_out_flag}" 2>/dev/null
+        return 124
     fi
-    "$@"
+    return "${rc}"
+}
+fi
+
+# _nord_ctl_run_bounded — thin, name-compatible wrapper over the shared
+# _vpn_run_bounded, bounded by NORD_CTL_CALL_TIMEOUT. Returns the wrapped
+# command's exit status (or 124 on timeout, matching GNU timeout's
+# convention).
+_nord_ctl_run_bounded() {
+    _vpn_run_bounded "${NORD_CTL_CALL_TIMEOUT}" "$@"
     return $?
 }
 
@@ -130,9 +184,9 @@ _nord_ctl_shortcut_exists() {
     if [ -n "${NORD_CTL_SHORTCUTS_LIST_OVERRIDE+x}" ]; then
         listing="${NORD_CTL_SHORTCUTS_LIST_OVERRIDE}"
     else
-        listing="$(_nord_ctl_run_bounded shortcuts list 2>/dev/null)"
+        listing="$(_nord_ctl_run_bounded /usr/bin/shortcuts list 2>/dev/null)"
     fi
-    printf '%s\n' "${listing}" | grep -Fxq -- "${name}"
+    printf '%s\n' "${listing}" | /usr/bin/grep -Fxq -- "${name}"
 }
 
 # nord_state — print the current NordVPN mode as one of: up | down | app |
@@ -224,7 +278,7 @@ nord_connect() {
         return 3
     fi
 
-    _nord_ctl_run_bounded shortcuts run "${NORD_SHORTCUT_ON}" >/dev/null 2>&1
+    _nord_ctl_run_bounded /usr/bin/shortcuts run "${NORD_SHORTCUT_ON}" >/dev/null 2>&1
 
     if nord_wait_for up "${verify_timeout}"; then
         return 0
@@ -252,7 +306,7 @@ nord_disconnect() {
         return 3
     fi
 
-    _nord_ctl_run_bounded shortcuts run "${NORD_SHORTCUT_OFF}" >/dev/null 2>&1
+    _nord_ctl_run_bounded /usr/bin/shortcuts run "${NORD_SHORTCUT_OFF}" >/dev/null 2>&1
 
     if nord_wait_for down "${verify_timeout}"; then
         return 0

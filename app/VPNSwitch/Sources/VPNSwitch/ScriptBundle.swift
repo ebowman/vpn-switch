@@ -57,12 +57,72 @@ enum ScriptBundle {
     /// - Otherwise true when the installed stamp doesn't match the bundled
     ///   version, OR vpn-ctl.sh isn't present at the installed location at
     ///   all (fresh install / scripts never installed / accidentally
-    ///   deleted).
-    static func needsSync(bundledVersion: String?, installedStamp: String?, vpnCtlPresent: Bool) -> Bool {
+    ///   deleted), OR `contentsDiffer` is true (a bundled script's bytes no
+    ///   longer match the installed copy, even though the version stamp
+    ///   matches -- e.g. the installed lib was hand-edited, corrupted, or
+    ///   tampered with; dns-config-ci5 PART C self-healing).
+    static func needsSync(
+        bundledVersion: String?,
+        installedStamp: String?,
+        vpnCtlPresent: Bool,
+        contentsDiffer: Bool = false
+    ) -> Bool {
         guard let bundledVersion else { return false }
         if installedStamp != bundledVersion { return true }
         if !vpnCtlPresent { return true }
+        if contentsDiffer { return true }
         return false
+    }
+
+    /// Compares every file `sync(from:to:)` would copy (bin/vpn-ctl.sh,
+    /// lib/*.sh, config/lan-hosts.conf) byte-for-byte between the bundled
+    /// and installed trees. Returns `true` (contents differ / need sync) if
+    /// ANY of those files differs, including when a bundled file is simply
+    /// missing on the installed side. Deliberately mirrors `sync`'s own
+    /// file allowlist -- it must NEVER be extended to compare credential
+    /// files (nord-ikev2.env, *.mobileconfig), which are intentionally
+    /// excluded from both functions.
+    ///
+    /// Used to detect a tampered or stale installed copy even when the
+    /// version stamp still matches (needsSync's other checks are stamp/
+    /// presence based and would otherwise miss that case).
+    static func installedContentMatches(bundleDir: URL, installDir: URL) -> Bool {
+        let fm = FileManager.default
+
+        func filesMatch(_ a: URL, _ b: URL) -> Bool {
+            guard let dataA = try? Data(contentsOf: a), let dataB = try? Data(contentsOf: b) else {
+                return false
+            }
+            return dataA == dataB
+        }
+
+        // bin/vpn-ctl.sh
+        let vpnCtlSrc = bundleDir.appendingPathComponent("bin/vpn-ctl.sh")
+        if fm.fileExists(atPath: vpnCtlSrc.path) {
+            let dest = installDir.appendingPathComponent("bin/vpn-ctl.sh")
+            if !fm.fileExists(atPath: dest.path) { return false }
+            if !filesMatch(vpnCtlSrc, dest) { return false }
+        }
+
+        // lib/*.sh
+        let libSrcDir = bundleDir.appendingPathComponent("lib", isDirectory: true)
+        if let libFiles = try? fm.contentsOfDirectory(at: libSrcDir, includingPropertiesForKeys: nil) {
+            for libFile in libFiles where libFile.pathExtension == "sh" {
+                let dest = installDir.appendingPathComponent("lib/\(libFile.lastPathComponent)")
+                if !fm.fileExists(atPath: dest.path) { return false }
+                if !filesMatch(libFile, dest) { return false }
+            }
+        }
+
+        // config/lan-hosts.conf
+        let lanHostsSrc = bundleDir.appendingPathComponent("config/lan-hosts.conf")
+        if fm.fileExists(atPath: lanHostsSrc.path) {
+            let dest = installDir.appendingPathComponent("config/lan-hosts.conf")
+            if !fm.fileExists(atPath: dest.path) { return false }
+            if !filesMatch(lanHostsSrc, dest) { return false }
+        }
+
+        return true
     }
 
     /// Errors surfaced by `sync(from:to:)`.
@@ -204,8 +264,14 @@ enum ScriptBundle {
         let vpnCtlPresent = FileManager.default.fileExists(
             atPath: installedRootURL.appendingPathComponent("bin/vpn-ctl.sh").path
         )
+        let contentsDiffer = !installedContentMatches(bundleDir: bundledRootURL, installDir: installedRootURL)
 
-        guard needsSync(bundledVersion: bundledVer, installedStamp: installedVer, vpnCtlPresent: vpnCtlPresent) else {
+        guard needsSync(
+            bundledVersion: bundledVer,
+            installedStamp: installedVer,
+            vpnCtlPresent: vpnCtlPresent,
+            contentsDiffer: contentsDiffer
+        ) else {
             NSLog("ScriptBundle: installed scripts up to date (version \(installedVer ?? "unknown")); skipping sync")
             return []
         }

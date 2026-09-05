@@ -133,7 +133,7 @@ VPN_CTL_LOCKDIR="${VPN_CTL_LOCKDIR:-${REPO_ROOT}/.vpn-ctl.lock}"
 # (tolerates captive portals, matches bin/dns-watch.sh's WEB column).
 vpn_ctl_web_check() {
     local code
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "${VPN_CTL_WEB_TIMEOUT}" https://example.com 2>/dev/null)"
+    code="$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time "${VPN_CTL_WEB_TIMEOUT}" https://example.com 2>/dev/null)"
     case "${code}" in
         2*|3*) echo "ok" ;;
         *)     echo "fail" ;;
@@ -144,7 +144,7 @@ vpn_ctl_web_check() {
 # not resolve. Bounded so a dead resolver cannot hang the caller.
 vpn_ctl_streamy_check() {
     local addr
-    addr="$(timeout 5 dscacheutil -q host -a name streamy 2>/dev/null | awk '/ip_address/{print $2; exit}')"
+    addr="$(_vpn_run_bounded 5 /usr/bin/dscacheutil -q host -a name streamy 2>/dev/null | /usr/bin/awk '/ip_address/{print $2; exit}')"
     if [ -z "${addr}" ]; then
         echo "fail"
     else
@@ -196,7 +196,7 @@ vpn_ctl_acquire_lock() {
     # lock is stale: remove it and retry once. If there is no readable owner
     # pid we cannot tell, so we stay conservative and treat it as held.
     local owner_pid
-    owner_pid="$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "${VPN_CTL_LOCKDIR}/owner" 2>/dev/null | head -1)"
+    owner_pid="$(/usr/bin/sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "${VPN_CTL_LOCKDIR}/owner" 2>/dev/null | /usr/bin/head -1)"
     if [ -n "${owner_pid}" ] && ! kill -0 "${owner_pid}" 2>/dev/null; then
         echo "vpn-ctl: removing stale lock left by dead pid ${owner_pid}" >&2
         rm -rf "${VPN_CTL_LOCKDIR}" 2>/dev/null

@@ -30,6 +30,85 @@ struct ScriptBundleTests {
         #expect(ScriptBundle.needsSync(bundledVersion: "1.0+1", installedStamp: nil, vpnCtlPresent: true) == true)
     }
 
+    @Test func needsSyncTrueWhenContentsDiffer() {
+        #expect(ScriptBundle.needsSync(
+            bundledVersion: "1.0+1", installedStamp: "1.0+1", vpnCtlPresent: true, contentsDiffer: true
+        ) == true)
+    }
+
+    @Test func needsSyncFalseWhenStampMatchesAndContentsMatch() {
+        #expect(ScriptBundle.needsSync(
+            bundledVersion: "1.0+1", installedStamp: "1.0+1", vpnCtlPresent: true, contentsDiffer: false
+        ) == false)
+    }
+
+    // MARK: - installedContentMatches / self-healing sync (dns-config-ci5)
+
+    @Test func syncIfNeededResyncsWhenInstalledLibIsModifiedDespiteMatchingStamp() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let bundled = base.appendingPathComponent("bundled")
+        let installed = base.appendingPathComponent("installed")
+        try makeBundledTree(at: bundled, version: "9.9+9")
+
+        // First sync brings installed fully up to date (stamp + contents).
+        try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
+        _ = try ScriptBundle.sync(from: bundled, to: installed)
+
+        #expect(ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed) == true)
+
+        // Tamper with an installed lib without touching the stamp or VERSION.
+        try "#!/bin/bash\necho TAMPERED\n".write(
+            to: installed.appendingPathComponent("lib/a.sh"), atomically: true, encoding: .utf8
+        )
+
+        #expect(ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed) == false)
+
+        let bundledVer = "9.9+9"
+        let installedStamp = try String(
+            contentsOf: installed.appendingPathComponent(ScriptBundle.stampFileName), encoding: .utf8
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(installedStamp == bundledVer, "stamp should still match despite the tampered content")
+
+        let contentsDiffer = !ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed)
+        #expect(ScriptBundle.needsSync(
+            bundledVersion: bundledVer, installedStamp: installedStamp, vpnCtlPresent: true,
+            contentsDiffer: contentsDiffer
+        ) == true)
+    }
+
+    @Test func installedContentMatchesTrueWhenIdenticalContentsAndStampMatch() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let bundled = base.appendingPathComponent("bundled")
+        let installed = base.appendingPathComponent("installed")
+        try makeBundledTree(at: bundled, version: "9.9+9")
+        try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
+        _ = try ScriptBundle.sync(from: bundled, to: installed)
+
+        #expect(ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed) == true)
+        #expect(ScriptBundle.needsSync(
+            bundledVersion: "9.9+9", installedStamp: "9.9+9", vpnCtlPresent: true, contentsDiffer: false
+        ) == false)
+    }
+
+    @Test func installedContentMatchesFalseWhenInstalledLibMissing() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let bundled = base.appendingPathComponent("bundled")
+        let installed = base.appendingPathComponent("installed")
+        try makeBundledTree(at: bundled, version: "9.9+9")
+        try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
+        _ = try ScriptBundle.sync(from: bundled, to: installed)
+
+        try FileManager.default.removeItem(at: installed.appendingPathComponent("lib/b.sh"))
+
+        #expect(ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed) == false)
+    }
+
     // MARK: - sync(from:to:)
 
     /// Builds a fabricated "bundled" tree at `root`:

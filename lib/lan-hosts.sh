@@ -58,7 +58,7 @@ lan_hosts_lan_ip() {
     local name="${1:-}"
     [ -n "${name}" ] || return 1
     [ -r "${LAN_HOSTS_CONF}" ] || return 1
-    awk -v want="${name}" '
+    /usr/bin/awk -v want="${name}" '
         /^[[:space:]]*#/ { next }
         /^[[:space:]]*$/ { next }
         {
@@ -85,7 +85,7 @@ lan_hosts_tailnet_ip() {
     local name="${1:-}"
     [ -n "${name}" ] || return 1
     [ -r "${LAN_HOSTS_CONF}" ] || return 1
-    awk -v want="${name}" '
+    /usr/bin/awk -v want="${name}" '
         /^[[:space:]]*#/ { next }
         /^[[:space:]]*$/ { next }
         {
@@ -101,7 +101,7 @@ lan_hosts_tailnet_ip() {
 # missing/unreadable.
 lan_hosts_names() {
     [ -r "${LAN_HOSTS_CONF}" ] || return 1
-    awk '
+    /usr/bin/awk '
         /^[[:space:]]*#/ { next }
         /^[[:space:]]*$/ { next }
         {

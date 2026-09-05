@@ -41,7 +41,7 @@ set -u
 # interface name (e.g. "ipsec0") on match, nothing otherwise.
 _nord_detect_ikev2_iface_from_ifconfig() {
     local ifconfig_text="$1"
-    printf '%s\n' "${ifconfig_text}" | awk '
+    printf '%s\n' "${ifconfig_text}" | /usr/bin/awk '
         /^ipsec[0-9]+:/ { iface = $1; sub(/:$/, "", iface); has_inet = 0; next }
         /^[a-zA-Z]/ { iface = "" }
         iface != "" && /inet /  { has_inet = 1; print iface; exit }
@@ -52,7 +52,7 @@ _nord_detect_ikev2_iface_from_ifconfig() {
 # Prints the interface name (e.g. "utun11") on match, nothing otherwise.
 _nord_detect_app_iface_from_ifconfig() {
     local ifconfig_text="$1"
-    printf '%s\n' "${ifconfig_text}" | awk '
+    printf '%s\n' "${ifconfig_text}" | /usr/bin/awk '
         /^utun[0-9]+:/ { iface = $1; sub(/:$/, "", iface); next }
         /^[a-zA-Z]/ { iface = "" }
         iface != "" && /inet 10\.5\./ { print iface; exit }
@@ -62,13 +62,13 @@ _nord_detect_app_iface_from_ifconfig() {
 # True (0) if scutil --dns output lists resolver 103.86.96.100 or 103.86.99.100.
 _nord_detect_scutil_has_ikev2_resolver() {
     local scutil_text="$1"
-    printf '%s\n' "${scutil_text}" | grep -q -E '103\.86\.(96|99)\.100'
+    printf '%s\n' "${scutil_text}" | /usr/bin/grep -q -E '103\.86\.(96|99)\.100'
 }
 
 # True (0) if scutil --dns output lists resolver 100.64.0.2.
 _nord_detect_scutil_has_app_resolver() {
     local scutil_text="$1"
-    printf '%s\n' "${scutil_text}" | grep -q -E '100\.64\.0\.2\b'
+    printf '%s\n' "${scutil_text}" | /usr/bin/grep -q -E '100\.64\.0\.2\b'
 }
 
 # nord_mode — print one of: ikev2 | app | app+ikev2 | absent (with interface
@@ -81,13 +81,13 @@ nord_mode() {
     if [ -n "${NORD_DETECT_IFCONFIG_OVERRIDE+x}" ]; then
         ifconfig_text="${NORD_DETECT_IFCONFIG_OVERRIDE}"
     else
-        ifconfig_text="$(ifconfig 2>/dev/null)"
+        ifconfig_text="$(/sbin/ifconfig 2>/dev/null)"
     fi
 
     if [ -n "${NORD_DETECT_SCUTIL_DNS_OVERRIDE+x}" ]; then
         scutil_text="${NORD_DETECT_SCUTIL_DNS_OVERRIDE}"
     else
-        scutil_text="$(scutil --dns 2>/dev/null)"
+        scutil_text="$(/usr/sbin/scutil --dns 2>/dev/null)"
     fi
 
     have_ikev2=0

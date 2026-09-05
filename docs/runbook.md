@@ -330,13 +330,24 @@ around.
 **Scripts stay in sync automatically.** The app bundles its own copy of
 `bin/vpn-ctl.sh`, `lib/*.sh`, and `config/lan-hosts.conf`. On every launch
 it compares a version stamp (`.installed-version`) against what's already
-installed under `~/Library/Application Support/vpn-switch` and re-copies
-those files if they differ (or if `vpn-ctl.sh` is missing there). So a
-self-update that only replaces the `.app` also brings the control scripts
-up to date without needing to re-run `install-vpn-switch.sh`. The same sync
-can be run headlessly with `VPNSwitch --sync-scripts`. Either way, the
-scripts always *run* from Application Support, never from inside the
-signed app bundle.
+installed under `~/Library/Application Support/vpn-switch`, and also
+compares the bundled and installed scripts byte-for-byte, re-copying those
+files if either the stamp differs, `vpn-ctl.sh` is missing there, or any
+installed script's contents no longer match the bundled copy (a stale or
+tampered installed lib is repaired on the next launch even if the version
+stamp still matches). So a self-update that only replaces the `.app` also
+brings the control scripts up to date without needing to re-run
+`install-vpn-switch.sh`. The same sync can be run headlessly with
+`VPNSwitch --sync-scripts`. Either way, the scripts always *run* from
+Application Support, never from inside the signed app bundle.
+
+**Scripts run with a fixed, minimal environment.** The app spawns
+`vpn-ctl.sh` with a fixed `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin`)
+that deliberately excludes Homebrew's directories, rather than inheriting
+the app's own environment verbatim; every external tool `vpn-ctl.sh` and
+`lib/*.sh` call is invoked by absolute path regardless. Homebrew coreutils'
+`timeout`/`gtimeout` are no longer required — `lib/tailscale-ctl.sh` and
+`lib/nord-ctl.sh` vendor their own pure-shell bounded runner instead.
 
 **Testing override.** To exercise the update-check loop without waiting a
 full day, shorten the interval (minimum 60 seconds; anything lower is
