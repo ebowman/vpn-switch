@@ -24,3 +24,6 @@ jobs:
 
       - name: Shell syntax check
         run: bash -n bin/*.sh lib/*.sh
+
+      - name: Shell tests
+        run: bash tests/vpn-run-bounded-test.sh && bash tests/nord-ikev2-profile-test.sh
