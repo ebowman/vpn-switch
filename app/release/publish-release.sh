@@ -31,6 +31,11 @@
 #      for why.
 #   3. The working tree is clean (`git status --porcelain` is empty) — a
 #      release must describe an exact, reproducible commit.
+#   3b. `git fetch origin` (a warning, not a failure, if unreachable), then
+#      local HEAD must equal origin/<current-branch> — a release must
+#      publish a commit that is already on the shared remote, not one
+#      that only exists locally. Fails with an actionable "push first"
+#      message if HEAD and the remote branch have diverged.
 #   4. The tag v$VERSION does not already exist, locally or on origin —
 #      refuses to silently re-publish or shadow a prior release. An
 #      unreachable remote degrades this check to a warning rather than an
@@ -84,7 +89,11 @@
 #
 # Publishing:
 #   gh release create "v$VERSION" --title "VPN Switch v$VERSION" \
-#       --generate-notes "$DMG_PATH" "$MANIFEST_PATH"
+#       --generate-notes --target "$LOCAL_HEAD" "$DMG_PATH" "$MANIFEST_PATH"
+#   --target pins the tag to the exact commit verified by precondition 3b
+#   above (local HEAD, confirmed equal to origin/<branch>), rather than
+#   letting `gh` default to the remote's default branch tip — which could
+#   silently differ if this script is ever run from a non-default branch.
 #
 # This script performs a real network operation (gh release create) and
 # is NEVER invoked as a side effect of a bare `make` or `make all` — only
@@ -217,6 +226,35 @@ if [ -n "$(git -C "${REPO_ROOT}" status --porcelain)" ]; then
     exit 1
 fi
 
+# --- Precondition 3b: local HEAD matches origin's copy of this branch -----
+# A release must publish exactly the commit that is already on the shared
+# remote — otherwise the tag could point at a commit nobody else can see
+# yet. An unreachable remote degrades this to a warning (matching the tag
+# check below), since a network hiccup must not block a release; but if
+# origin IS reachable and HEAD has simply not been pushed, that is a hard
+# failure with a specific fix.
+CURRENT_BRANCH="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD)"
+LOCAL_HEAD="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+
+if git -C "${REPO_ROOT}" fetch origin >/dev/null 2>&1; then
+    if REMOTE_HEAD="$(git -C "${REPO_ROOT}" rev-parse "origin/${CURRENT_BRANCH}" 2>/dev/null)"; then
+        if [ "${LOCAL_HEAD}" != "${REMOTE_HEAD}" ]; then
+            echo "error: local HEAD (${LOCAL_HEAD}) does not match origin/${CURRENT_BRANCH}" >&2
+            echo "       (${REMOTE_HEAD})." >&2
+            echo "       A release must publish a commit that is already on the shared remote." >&2
+            echo "       Push first, then rerun:" >&2
+            echo "         git push origin ${CURRENT_BRANCH}" >&2
+            exit 1
+        fi
+    else
+        echo "warning: could not resolve 'origin/${CURRENT_BRANCH}'; proceeding without" >&2
+        echo "         verifying HEAD matches the remote." >&2
+    fi
+else
+    echo "warning: could not reach 'origin' to verify HEAD matches the remote branch;" >&2
+    echo "         proceeding on the local commit alone." >&2
+fi
+
 # --- Precondition 4: tag v$VERSION does not already exist ------------------
 TAG="v${VERSION}"
 if git -C "${REPO_ROOT}" rev-parse "${TAG}" >/dev/null 2>&1; then
@@ -308,6 +346,7 @@ echo "==> Publishing release ${TAG} to ${OWNER}/${REPO}..."
 gh release create "${TAG}" \
     --title "VPN Switch v${VERSION}" \
     --generate-notes \
+    --target "${LOCAL_HEAD}" \
     "${DMG_PATH}" \
     "${MANIFEST_PATH}"
 

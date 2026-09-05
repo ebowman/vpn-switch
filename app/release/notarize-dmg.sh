@@ -26,13 +26,19 @@
 #
 # CREDENTIALS: never printed, copied, or logged by this script. Resolved
 # in this order:
-#   1. NOTARY_PROFILE env var (default "VPNSwitchNotary") — a keychain
-#      profile created once via `xcrun notarytool store-credentials`, used
-#      via `--keychain-profile`.
-#   2. NOTARY_KEY / NOTARY_KEY_ID / NOTARY_ISSUER env vars — an App Store
+#   1. NOTARY_PROFILE env var, if set — tried ALONE (no fallback list): a
+#      keychain profile created once via `xcrun notarytool
+#      store-credentials`, used via `--keychain-profile`.
+#   2. If NOTARY_PROFILE is unset: try a candidate list of keychain profile
+#      names, in order — "VPNSwitchNotary" then "GateOpenerNotary" (the
+#      latter is a profile from another project on the same Apple
+#      Developer account, safe to reuse) — probing each with `xcrun
+#      notarytool history --keychain-profile <name>` and using the first
+#      one that succeeds.
+#   3. NOTARY_KEY / NOTARY_KEY_ID / NOTARY_ISSUER env vars — an App Store
 #      Connect API key path, key ID, and issuer ID, used via `--key`,
 #      `--key-id`, `--issuer`. For a contributor without a stored profile.
-#   3. Neither available: fail with setup instructions (see
+#   4. None available: fail with setup instructions (see
 #      credentials_missing() below) rather than a raw notarytool error.
 #
 # This is a real network round trip against Apple and can take several
@@ -62,13 +68,15 @@ credentials_missing() {
     echo "     Users and Access -> Integrations -> App Store Connect API." >&2
     echo "     Verify with:" >&2
     echo "       xcrun notarytool history --keychain-profile \"VPNSwitchNotary\"" >&2
-    echo "     Then rerun this script (it uses the profile named" >&2
-    echo "     \"VPNSwitchNotary\" by default, or set NOTARY_PROFILE to match" >&2
-    echo "     a differently-named profile)." >&2
+    echo "     Then rerun this script — with NOTARY_PROFILE unset, it tries" >&2
+    echo "     \"VPNSwitchNotary\" then \"GateOpenerNotary\" automatically, or" >&2
+    echo "     set NOTARY_PROFILE to pin a specific (possibly differently" >&2
+    echo "     named) profile." >&2
     echo "" >&2
     echo "     If you already have a stored profile from another project" >&2
     echo "     (e.g. \"GateOpenerNotary\") using the same Apple Developer" >&2
-    echo "     account, you can reuse it instead of creating a new one:" >&2
+    echo "     account, you can reuse it instead of creating a new one — it" >&2
+    echo "     is tried automatically, or pin it explicitly:" >&2
     echo "       export NOTARY_PROFILE=GateOpenerNotary" >&2
     echo "" >&2
     echo "  2. (No stored profile) Set these env vars for this invocation:" >&2
@@ -76,6 +84,7 @@ credentials_missing() {
     echo "       NOTARY_KEY_ID=<key-id>" >&2
     echo "       NOTARY_ISSUER=<issuer-id>" >&2
     echo "" >&2
+    echo "Tried keychain profile(s): ${TRIED_PROFILES:-<none>}" >&2
     exit 1
 }
 
@@ -103,13 +112,44 @@ if [ ! -f "${DMG_PATH}" ]; then
 fi
 
 # --- Resolve credentials -----------------------------------------------
+#
+# If NOTARY_PROFILE is set in the environment, it is tried alone (an
+# operator pinning an exact profile should never silently fall through to
+# a different one). Otherwise, try a fixed candidate list of profile
+# names in order and use the first one that actually resolves in the
+# keychain (probed via `notarytool history`, which never prints/logs
+# credential material). This lets this machine's "GateOpenerNotary"
+# profile (from another project, same Apple Developer account) work with
+# zero configuration, while still preferring a purpose-named
+# "VPNSwitchNotary" profile if one exists.
 
-NOTARY_PROFILE="${NOTARY_PROFILE:-VPNSwitchNotary}"
+resolve_notary_profile() {
+    # Prints the resolved profile name on stdout and returns 0 on success;
+    # returns 1 (prints nothing) if none of the candidates resolve. Sets
+    # TRIED_PROFILES (space-separated) as a side effect for use in the
+    # credentials_missing() error message.
+    local candidates candidate
+    if [ -n "${NOTARY_PROFILE:-}" ]; then
+        candidates="${NOTARY_PROFILE}"
+    else
+        candidates="VPNSwitchNotary GateOpenerNotary"
+    fi
+
+    TRIED_PROFILES=""
+    for candidate in ${candidates}; do
+        TRIED_PROFILES="${TRIED_PROFILES}${TRIED_PROFILES:+ }${candidate}"
+        if xcrun notarytool history --keychain-profile "${candidate}" >/dev/null 2>&1; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
 
 NOTARY_AUTH_ARGS=()
-if xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
-    echo "==> Using keychain profile: ${NOTARY_PROFILE}"
-    NOTARY_AUTH_ARGS=(--keychain-profile "${NOTARY_PROFILE}")
+if RESOLVED_PROFILE="$(resolve_notary_profile)"; then
+    echo "==> Using keychain profile: ${RESOLVED_PROFILE}"
+    NOTARY_AUTH_ARGS=(--keychain-profile "${RESOLVED_PROFILE}")
 elif [ -n "${NOTARY_KEY:-}" ] && [ -n "${NOTARY_KEY_ID:-}" ] && [ -n "${NOTARY_ISSUER:-}" ]; then
     echo "==> Using API key credentials from NOTARY_KEY/NOTARY_KEY_ID/NOTARY_ISSUER"
     NOTARY_AUTH_ARGS=(--key "${NOTARY_KEY}" --key-id "${NOTARY_KEY_ID}" --issuer "${NOTARY_ISSUER}")

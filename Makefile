@@ -1,4 +1,4 @@
-.PHONY: build test clean dmg notarize release
+.PHONY: build test clean dmg notarize release cut
 
 build:
 	swift build --package-path app/VPNSwitch
@@ -37,3 +37,17 @@ notarize:
 # human operator, runs this.
 release:
 	app/release/publish-release.sh
+
+# One-shot release cutter: bump version, commit, push, build, notarize,
+# and publish, all in one command. See app/release/cut-release.sh for the
+# full step list and failure semantics. THIS IS THE ONLY TARGET IN THIS
+# MAKEFILE THAT PUSHES TO ORIGIN — none of `dmg`, `notarize`, or `release`
+# above touch the remote's branches (only `release` creates a tag/release,
+# never a branch push). Requires VERSION=X.Y.Z; set CUT_DRY_RUN=1 to
+# preview every step without changing or publishing anything.
+cut:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Usage: make cut VERSION=X.Y.Z" >&2; \
+		exit 1; \
+	fi
+	app/release/cut-release.sh "$(VERSION)"

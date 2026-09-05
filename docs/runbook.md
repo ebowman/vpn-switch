@@ -573,9 +573,29 @@ already-installed Mac.
     API key from Users and Access > Integrations), **or**
   - if you already have a stored profile from another project on the same
     Apple Developer account, reuse it: `export NOTARY_PROFILE=GateOpenerNotary`.
+    You don't even need to set `NOTARY_PROFILE` for this — with it unset,
+    `make notarize` (and `make cut`) tries `VPNSwitchNotary` first, then
+    falls back to `GateOpenerNotary` automatically, using whichever one is
+    actually present in the keychain.
 - `gh auth login` — `make release` publishes via `gh release create`.
 
-**Release sequence:**
+**One-shot.** `make cut VERSION=0.5.0` (or `/release 0.5.0` in Claude Code)
+runs the entire sequence below — steps 1-5 plus the push in between — as a
+single command: bump the version, commit, `git push origin main`, `make dmg`,
+`make notarize`, `make release`, then verify the published `appcast.json`
+actually reports the new version (retrying briefly, since GitHub's `latest`
+redirect can lag). It fails fast, before the next irreversible step, if any
+stage fails, and if the push already succeeded before a later stage fails, it
+says so explicitly — `make notarize` / `make release` are safe to re-run by
+hand in that case. Notarization credentials are resolved the same way as
+`make notarize` below: a `VPNSwitchNotary` keychain profile first, falling
+back automatically to `GateOpenerNotary` if that's what's actually stored.
+`CUT_DRY_RUN=1 make cut VERSION=0.5.0` previews every step (including all
+preconditions, checked for real) without changing or publishing anything.
+The manual sequence below remains useful for troubleshooting a single step
+in isolation.
+
+**Release sequence (manual):**
 
 1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in
    `app/VPNSwitch/Info.plist`.
