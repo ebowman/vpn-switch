@@ -86,7 +86,12 @@ Four human steps, summarized:
    separate, revocable username/password, not your account login.
 3. **Run the generator**: `bash bin/nord-ikev2-profile.sh` with
    `NORD_IKEV2_SERVER` / `NORD_IKEV2_USER` / `NORD_IKEV2_PASS` (or
-   `NORD_IKEV2_ENVFILE` pointing at a mode-600 file) set. It only writes a
+   `NORD_IKEV2_ENVFILE` pointing at a mode-600 file) set. The envfile must be
+   a regular file (not a symlink) owned by the current user, and each
+   non-blank, non-`#`-comment line must be a literal `KEY=VALUE` pair for one
+   of `NORD_IKEV2_SERVER`/`NORD_IKEV2_USER`/`NORD_IKEV2_PASS`/`NORD_IKEV2_SEARCH_DOMAINS`/`NORD_IKEV2_DNS_SERVERS`/`NORD_IKEV2_OUT`
+   — it is parsed, never sourced, so no shell syntax in the value is ever
+   executed. It only writes a
    `.mobileconfig` file outside this repo — it never installs anything. The
    generator now also writes a DNS dictionary into the profile
    (`ServerAddresses` `103.86.96.100`/`103.86.99.100`, `SearchDomains`

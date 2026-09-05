@@ -87,11 +87,52 @@ fi
 CA_DER="${REPO_ROOT}/config/nord-ikev2/nordvpn-root.der"
 
 # ---------------------------------------------------------------------------
-# Load NORD_IKEV2_ENVFILE if given. Refuse unless it is mode 600 (owner
-# read/write only) so we don't source credentials sitting in a
-# world/group-readable file.
+# Load NORD_IKEV2_ENVFILE if given.
+#
+# Refused unless:
+#   - the path is a regular file (not a symlink: a symlink lets an attacker
+#     who controls the link target bypass the mode/owner checks below, which
+#     `stat` would otherwise happily report for the link's target, not the
+#     link itself);
+#   - it is mode 600 (owner read/write only);
+#   - it is owned by the user running this script (a mode-600 file owned by
+#     someone else is still readable/writable by them, and by extension the
+#     content is not something the current user should trust as their own
+#     credentials).
+#
+# The file is NOT shell-sourced. It is parsed line-by-line as a strict
+# KEY=VALUE format with NO shell evaluation (no eval, no indirect expansion,
+# no `.`/source), so a line like `NORD_IKEV2_PASS=x; touch ~/pwned` is
+# rejected outright rather than executed.
+#
+# Allowed keys (every other NORD_IKEV2_* variable this script reads,
+# enumerated so the allowlist can't silently drift from what the rest of the
+# script actually honours):
+#   NORD_IKEV2_SERVER, NORD_IKEV2_USER, NORD_IKEV2_PASS,
+#   NORD_IKEV2_SEARCH_DOMAINS, NORD_IKEV2_DNS_SERVERS, NORD_IKEV2_OUT
+#
+# Format rules:
+#   - blank lines and lines whose first non-space character is '#' are
+#     skipped;
+#   - every other line must match exactly `KEY=VALUE` for one of the keys
+#     above; anything else (unknown key, no '=', stray shell syntax) aborts
+#     the whole run before any value is used;
+#   - the value is everything after the first '=', taken completely
+#     literally: no quote processing, no variable expansion, no escapes —
+#     EXCEPT that if the value both starts and ends with a matching pair of
+#     single or double quotes, exactly ONE such surrounding pair is stripped
+#     (so existing files written as `KEY="value"` keep working). A value
+#     that is just `""` or `''` becomes empty;
+#   - values set in the file OVERRIDE the corresponding environment
+#     variable, matching the previous `. "$file"` sourcing behavior (the
+#     envfile, when given, is treated as the authoritative source, not a
+#     fallback for unset vars).
 # ---------------------------------------------------------------------------
 if [ -n "${NORD_IKEV2_ENVFILE:-}" ]; then
+    if [ -L "${NORD_IKEV2_ENVFILE}" ]; then
+        echo "Error: NORD_IKEV2_ENVFILE '${NORD_IKEV2_ENVFILE}' is a symlink; point it directly at the real file" >&2
+        exit 1
+    fi
     if [ ! -f "${NORD_IKEV2_ENVFILE}" ]; then
         echo "Error: NORD_IKEV2_ENVFILE '${NORD_IKEV2_ENVFILE}' does not exist" >&2
         exit 1
@@ -105,8 +146,64 @@ if [ -n "${NORD_IKEV2_ENVFILE:-}" ]; then
         echo "Error: NORD_IKEV2_ENVFILE '${NORD_IKEV2_ENVFILE}' must be mode 600 (found ${ENVFILE_MODE}); run: chmod 600 '${NORD_IKEV2_ENVFILE}'" >&2
         exit 1
     fi
-    # shellcheck source=/dev/null
-    . "${NORD_IKEV2_ENVFILE}"
+    ENVFILE_UID="$(stat -f '%u' "${NORD_IKEV2_ENVFILE}" 2>/dev/null)"
+    CURRENT_UID="$(id -u)"
+    if [ -z "${ENVFILE_UID}" ]; then
+        echo "Error: could not stat owner of NORD_IKEV2_ENVFILE '${NORD_IKEV2_ENVFILE}'" >&2
+        exit 1
+    fi
+    if [ "${ENVFILE_UID}" != "${CURRENT_UID}" ]; then
+        echo "Error: NORD_IKEV2_ENVFILE '${NORD_IKEV2_ENVFILE}' must be owned by the current user (uid ${CURRENT_UID}), found uid ${ENVFILE_UID}" >&2
+        exit 1
+    fi
+
+    ENVFILE_LINE_NO=0
+    while IFS= read -r _envfile_line || [ -n "${_envfile_line}" ]; do
+        ENVFILE_LINE_NO=$((ENVFILE_LINE_NO + 1))
+
+        # Skip blank lines (possibly whitespace-only).
+        case "${_envfile_line}" in
+            *[!' ']*) ;;
+            *) continue ;;
+        esac
+
+        # Skip comment lines: first non-space char is '#'.
+        _envfile_trimmed="${_envfile_line#"${_envfile_line%%[! ]*}"}"
+        case "${_envfile_trimmed}" in
+            '#'*) continue ;;
+        esac
+
+        case "${_envfile_line}" in
+            NORD_IKEV2_SERVER=*|NORD_IKEV2_USER=*|NORD_IKEV2_PASS=*|NORD_IKEV2_SEARCH_DOMAINS=*|NORD_IKEV2_DNS_SERVERS=*|NORD_IKEV2_OUT=*)
+                _envfile_key="${_envfile_line%%=*}"
+                _envfile_val="${_envfile_line#*=}"
+                ;;
+            *)
+                echo "Error: NORD_IKEV2_ENVFILE line ${ENVFILE_LINE_NO} is not KEY=VALUE for an allowed key" >&2
+                exit 1
+                ;;
+        esac
+
+        # Strip exactly one matching pair of surrounding quotes, if present.
+        case "${_envfile_val}" in
+            \"*\"|\'*\')
+                if [ "${#_envfile_val}" -ge 2 ]; then
+                    _envfile_val="${_envfile_val#?}"
+                    _envfile_val="${_envfile_val%?}"
+                fi
+                ;;
+        esac
+
+        case "${_envfile_key}" in
+            NORD_IKEV2_SERVER)          NORD_IKEV2_SERVER="${_envfile_val}" ;;
+            NORD_IKEV2_USER)            NORD_IKEV2_USER="${_envfile_val}" ;;
+            NORD_IKEV2_PASS)            NORD_IKEV2_PASS="${_envfile_val}" ;;
+            NORD_IKEV2_SEARCH_DOMAINS)  NORD_IKEV2_SEARCH_DOMAINS="${_envfile_val}" ;;
+            NORD_IKEV2_DNS_SERVERS)     NORD_IKEV2_DNS_SERVERS="${_envfile_val}" ;;
+            NORD_IKEV2_OUT)             NORD_IKEV2_OUT="${_envfile_val}" ;;
+        esac
+    done < "${NORD_IKEV2_ENVFILE}"
+    unset _envfile_line _envfile_trimmed _envfile_key _envfile_val ENVFILE_LINE_NO ENVFILE_MODE ENVFILE_UID CURRENT_UID
 fi
 
 # ---------------------------------------------------------------------------
@@ -123,8 +220,60 @@ if [ -z "${NORD_IKEV2_PASS:-}" ]; then
     MISSING="${MISSING} NORD_IKEV2_PASS"
 fi
 if [ -n "${MISSING}" ]; then
-    echo "Error: missing required env var(s):${MISSING}" >&2
+    echo "Error: missing required variables:${MISSING}" >&2
     echo "Set them directly, or point NORD_IKEV2_ENVFILE at a mode-600 file that sets them." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Reject control characters (0x00-0x1F, 0x7F) in any value that will be
+# embedded in the plist: a raw control character produces an unparseable
+# plist even after XML-escaping (xml_escape only handles the five XML
+# metacharacters). Checked with LC_ALL=C so byte ranges are stable regardless
+# of locale. Never echo the value itself in the error for NORD_IKEV2_PASS.
+# ---------------------------------------------------------------------------
+_has_control_char() {
+    # Returns 0 (true) if $1 contains a byte in 0x00-0x1F or 0x7F.
+    LC_ALL=C
+    case "$1" in
+        *[$'\001'-$'\037']*|*$'\177'*) return 0 ;;
+    esac
+    return 1
+}
+
+if _has_control_char "${NORD_IKEV2_SERVER}"; then
+    echo "Error: NORD_IKEV2_SERVER contains a control character" >&2
+    exit 1
+fi
+if _has_control_char "${NORD_IKEV2_USER}"; then
+    echo "Error: NORD_IKEV2_USER contains a control character" >&2
+    exit 1
+fi
+if _has_control_char "${NORD_IKEV2_PASS}"; then
+    echo "Error: NORD_IKEV2_PASS contains a control character" >&2
+    exit 1
+fi
+if _has_control_char "${NORD_IKEV2_SEARCH_DOMAINS:-}"; then
+    echo "Error: NORD_IKEV2_SEARCH_DOMAINS contains a control character" >&2
+    exit 1
+fi
+if _has_control_char "${NORD_IKEV2_DNS_SERVERS:-}"; then
+    echo "Error: NORD_IKEV2_DNS_SERVERS contains a control character" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Validate NORD_IKEV2_SERVER as a syntactically plausible DNS hostname before
+# it is embedded (twice) in the plist as RemoteAddress/RemoteIdentifier.
+# ---------------------------------------------------------------------------
+case "${NORD_IKEV2_SERVER}" in
+    *[!A-Za-z0-9.-]*)
+        echo "Error: NORD_IKEV2_SERVER '${NORD_IKEV2_SERVER}' is not a valid hostname" >&2
+        exit 1
+        ;;
+esac
+if ! printf '%s\n' "${NORD_IKEV2_SERVER}" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'; then
+    echo "Error: NORD_IKEV2_SERVER '${NORD_IKEV2_SERVER}' is not a valid hostname" >&2
     exit 1
 fi
 
