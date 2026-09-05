@@ -6,6 +6,22 @@ struct VPNSwitchApp: App {
     @StateObject private var model = AppModel()
 
     init() {
+        // Syncs the bundled control scripts into the installed location
+        // (~/Library/Application Support/vpn-switch) and exits -- used by
+        // the install script / for scripting and diagnostics. Same sync
+        // AppModel.startPolling() performs on ordinary launch
+        // (dns-config-8v7.3).
+        if CommandLine.arguments.contains("--sync-scripts") {
+            let written = ScriptBundle.syncIfNeeded()
+            if written.isEmpty {
+                print("scripts up to date")
+            } else {
+                for path in written {
+                    print(path)
+                }
+            }
+            exit(0)
+        }
         if CommandLine.arguments.contains("--selftest-queue") {
             SelfTest.runQueueCasesAndExit()
         }

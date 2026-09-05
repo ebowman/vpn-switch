@@ -120,6 +120,10 @@ final class AppModel: ObservableObject {
     /// more than once for a MenuBarExtra).
     func startPolling() {
         guard pollTask == nil else { return }
+        // Sync the control scripts from the bundle (if a newer VERSION is
+        // shipped, or they're missing) before the first poll ever runs a
+        // stale vpn-ctl.sh. Synchronous: a handful of small file copies.
+        _ = ScriptBundle.syncIfNeeded()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }

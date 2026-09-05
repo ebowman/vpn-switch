@@ -37,6 +37,11 @@
 # separately, from the app's own "Launch at login" menu toggle -- this
 # script does not register it).
 #
+# The app also self-syncs these scripts from its own bundle on every launch
+# (see ScriptBundle.swift / dns-config-8v7.3), so a self-update that only
+# replaces the .app keeps the installed scripts current without rerunning
+# this install script.
+#
 # Repo conventions: set -u, no set -e, case-guard BASH_SOURCE resolution,
 # bash 3.2 compatible (no 'declare -A', no '${var,,}'). No sudo. No dig.
 
