@@ -10,6 +10,11 @@ let package = Package(
         .executableTarget(
             name: "VPNSwitch",
             path: "Sources/VPNSwitch"
+        ),
+        .testTarget(
+            name: "VPNSwitchTests",
+            dependencies: ["VPNSwitch"],
+            path: "Tests/VPNSwitchTests"
         )
     ]
 )
