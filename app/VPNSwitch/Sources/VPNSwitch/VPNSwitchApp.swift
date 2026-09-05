@@ -6,6 +6,22 @@ struct VPNSwitchApp: App {
     @StateObject private var model = AppModel()
 
     init() {
+        // Syncs the bundled control scripts into the installed location
+        // (~/Library/Application Support/vpn-switch) and exits -- used by
+        // the install script / for scripting and diagnostics. Same sync
+        // AppModel.startPolling() performs on ordinary launch
+        // (dns-config-8v7.3).
+        if CommandLine.arguments.contains("--sync-scripts") {
+            let written = ScriptBundle.syncIfNeeded()
+            if written.isEmpty {
+                print("scripts up to date")
+            } else {
+                for path in written {
+                    print(path)
+                }
+            }
+            exit(0)
+        }
         if CommandLine.arguments.contains("--selftest-queue") {
             SelfTest.runQueueCasesAndExit()
         }
@@ -86,6 +102,9 @@ struct MenuContentView: View {
                 } else if let message = model.headerMessage {
                     Text(message)
                 }
+                if let update = model.availableUpdate {
+                    Text("Update available: \(update.latestVersion)")
+                }
             }
 
             if isAppTunnelError {
@@ -158,7 +177,10 @@ struct MenuContentView: View {
                 model.refresh()
             }
 
-            Toggle("Notify on external changes", isOn: $model.notifyOnExternalChanges)
+            Group {
+                Toggle("Notify on external changes", isOn: $model.notifyOnExternalChanges)
+                Toggle("Check for updates automatically", isOn: $model.autoUpdateCheckEnabled)
+            }
 
             Divider()
 
@@ -174,20 +196,37 @@ struct MenuContentView: View {
 
             Divider()
 
-            Button("Quit") {
-                model.stopPolling()
-                // Discard any not-yet-started queued intents so teardown
-                // doesn't start a new vpn-ctl.sh process right as we're
-                // quitting -- only a command already in flight (handled by
-                // terminateAllInFlight below) can still be running.
-                model.discardPendingActions()
-                // Belt-and-braces for the case where a poll or toggle is
-                // synchronously blocked inside VPNCtl.run right now (Task
-                // cancellation from stopPolling cannot interrupt a blocking
-                // waitpid/read loop) -- without this, quitting mid-run would
-                // orphan that child (and any grandchildren) under launchd.
-                VPNCtl.terminateAllInFlight()
-                NSApplication.shared.terminate(nil)
+            Group {
+                if let update = model.availableUpdate {
+                    Group {
+                        Button("Install Update \(update.latestVersion)…") {
+                            model.installAvailableUpdate()
+                        }
+
+                        Button("Skip This Version") {
+                            model.skipAvailableUpdate()
+                        }
+                    }
+                }
+
+                Button("Check for Updates…") {
+                    model.checkForUpdates()
+                }
+
+                Button("Quit") {
+                    // prepareForTermination() covers everything Quit needs
+                    // to tear down cleanly (stop polling/wake observer,
+                    // discard not-yet-started queued intents, and terminate
+                    // any vpn-ctl.sh child already in flight so no child
+                    // outlives the app under launchd) -- see AppModel for
+                    // the full rationale. It's also shared with the
+                    // "Check for Updates…" -> "Install and Relaunch" path
+                    // (dns-config-8v7.6), which needs the exact same
+                    // teardown immediately before its own irreversible
+                    // termination.
+                    model.prepareForTermination()
+                    NSApplication.shared.terminate(nil)
+                }
             }
         }
         // Polling is started from the MenuBarExtra label's onAppear (see

@@ -267,6 +267,69 @@ runs on steady-state polls and is silent housekeeping — failures are logged
 (Console.app / `log show --predicate 'process == "VPNSwitch"'`) but never
 shown in the menu bar UI.
 
+### Updating
+
+VPN Switch checks GitHub for a newer release automatically: 30 seconds after
+launch, then every 24 hours, and again on wake if a check is due. These
+background checks are **silent on failure** (logged only, never shown) and
+**never modal** — they never activate the app or interrupt what you're
+doing, and they **never auto-install**. If a newer release is found, the
+menu header grows an extra line, `Update available: <version>`, and two new
+items appear at the bottom of the menu: **"Install Update `<version>`…"**
+and **"Skip This Version"**. There's also a **"Check for updates
+automatically"** toggle in the menu (default on) if you want to turn the
+background checks off entirely; turning it off does not hide an update
+already found, it only stops future background checks.
+
+**Skip This Version** dismisses that update without installing it and
+remembers your choice — VPN Switch won't surface that exact version again,
+but a *later* release still will. It's sticky across relaunches.
+
+You can also check on demand: **"Check for Updates…"** in the menu. Unlike
+the background check, this one always shows an alert: "You're up to date"
+if there's nothing new, "VPN Switch `<version>` is available" with
+**"Install and Relaunch"** / **Cancel** buttons if there is, or an error
+alert if the check itself failed (no network, bad response, etc).
+
+**Install flow.** Choosing to install (from either "Install Update …" in
+the menu or "Install and Relaunch" in the manual-check alert) downloads the
+release DMG, then verifies it two independent ways before touching
+anything: the file's SHA-256 digest must match the one published in
+`appcast.json`, **and** the file must pass Apple's notarization check
+(`spctl`). Only if both pass does a small detached helper script swap the
+new build into place at the app's current location (normally
+`/Applications/VPN Switch.app`) and relaunch the app. The helper's own log is at `/tmp/vpn-switch-update.log` if you ever
+need to see what an install actually did. If verification fails for either
+reason, the downloaded file is discarded and the installed app is left
+completely untouched — nothing partial or broken is ever put in place.
+
+**Ad-hoc/dev builds cannot self-update.** This verification is by design:
+a build that isn't signed with the project's Developer ID and notarized by
+Apple will always fail the notarization check, so `bin/install-vpn-switch.sh`
+builds (see below) never offer to self-update. This is not a bug to work
+around.
+
+**Scripts stay in sync automatically.** The app bundles its own copy of
+`bin/vpn-ctl.sh`, `lib/*.sh`, and `config/lan-hosts.conf`. On every launch
+it compares a version stamp (`.installed-version`) against what's already
+installed under `~/Library/Application Support/vpn-switch` and re-copies
+those files if they differ (or if `vpn-ctl.sh` is missing there). So a
+self-update that only replaces the `.app` also brings the control scripts
+up to date without needing to re-run `install-vpn-switch.sh`. The same sync
+can be run headlessly with `VPNSwitch --sync-scripts`. Either way, the
+scripts always *run* from Application Support, never from inside the
+signed app bundle.
+
+**Testing override.** To exercise the update-check loop without waiting a
+full day, shorten the interval (minimum 60 seconds; anything lower is
+clamped up to 60):
+
+```bash
+defaults write ie.boboco.vpnswitch updateCheckIntervalSeconds -int 60
+```
+
+Relaunch VPN Switch for the new interval to take effect.
+
 ## 5. Verifying
 
 ```
@@ -490,3 +553,106 @@ nothing else on the machine uses it. If you also want to remove the
   refuses to overwrite an existing one.
 - `config/nord-ikev2/` — the NordVPN IKEv2 root CA only (public, safe to
   commit). No credentials live in this repo.
+
+## Releasing
+
+This section is for whoever cuts a VPN Switch release — most days you don't
+need it; see "Updating" (Section 4) for how a release actually reaches an
+already-installed Mac.
+
+**Prerequisites (one-time setup):**
+
+- A **Developer ID Application** code-signing identity installed in the
+  login keychain. `app/build.sh`/`app/release/make-dmg.sh` auto-detect it
+  (via `app/release/lib/resolve-codesign-identity.sh`); an ad-hoc-only
+  keychain refuses to produce a distributable DMG unless you explicitly
+  override it.
+- Notarization credentials, either:
+  - `xcrun notarytool store-credentials VPNSwitchNotary --key <path-to-AuthKey_XXXX.p8> --key-id <key-id> --issuer <issuer-id>`
+    (stores a keychain profile named `VPNSwitchNotary`, App Store Connect
+    API key from Users and Access > Integrations), **or**
+  - if you already have a stored profile from another project on the same
+    Apple Developer account, reuse it: `export NOTARY_PROFILE=GateOpenerNotary`.
+    You don't even need to set `NOTARY_PROFILE` for this — with it unset,
+    `make notarize` (and `make cut`) tries `VPNSwitchNotary` first, then
+    falls back to `GateOpenerNotary` automatically, using whichever one is
+    actually present in the keychain.
+- `gh auth login` — `make release` publishes via `gh release create`.
+
+**One-shot.** `make cut VERSION=0.5.0` (or `/release 0.5.0` in Claude Code)
+runs the entire sequence below — steps 1-5 plus the push in between — as a
+single command: bump the version, commit, `git push origin main`, `make dmg`,
+`make notarize`, `make release`, then verify the published `appcast.json`
+actually reports the new version (retrying briefly, since GitHub's `latest`
+redirect can lag). It fails fast, before the next irreversible step, if any
+stage fails, and if the push already succeeded before a later stage fails, it
+says so explicitly — `make notarize` / `make release` are safe to re-run by
+hand in that case. Notarization credentials are resolved the same way as
+`make notarize` below: a `VPNSwitchNotary` keychain profile first, falling
+back automatically to `GateOpenerNotary` if that's what's actually stored.
+`CUT_DRY_RUN=1 make cut VERSION=0.5.0` previews every step (including all
+preconditions, checked for real) without changing or publishing anything.
+The manual sequence below remains useful for troubleshooting a single step
+in isolation.
+
+**Release sequence (manual):**
+
+1. Bump `CFBundleShortVersionString` and `CFBundleVersion` in
+   `app/VPNSwitch/Info.plist`.
+2. Commit that change. (`make release` refuses to run against a dirty
+   working tree — see below.)
+3. `make dmg` — builds the app from source (release configuration),
+   code-signs it with the resolved Developer ID identity, and assembles a
+   distributable DMG at `app/build/VPNSwitch-<version>.dmg`. Refuses an
+   ad-hoc signature unless you explicitly opt in.
+4. `make notarize` — submits that DMG to Apple's notarization service,
+   waits for a result, staples the ticket, and verifies the stapled DMG
+   actually satisfies Gatekeeper (`spctl -a -t open --context
+   context:primary-signature`). This is a real network round trip and can
+   take several minutes; never run as a side effect of `make dmg` or `make
+   release`.
+5. `make release` — publishes the GitHub release. Before doing anything, it
+   checks: `origin` resolves to `github.com/ebowman/vpn-switch` (the exact
+   host/owner/repo the app's own updater pins downloads to); the working
+   tree is clean; the tag `v<version>` doesn't already exist locally or on
+   `origin`; and the built DMG exists and re-passes the same notarization
+   check as step 4. Only if every check passes does it generate
+   `appcast.json` (fields `latestVersion`, `notes`, `dmgURL`, `dmgSHA256` —
+   the SHA is computed from the exact DMG file that was just verified) and
+   run `gh release create` to publish tag `v<version>`, release title "VPN
+   Switch v<version>", with both `VPNSwitch-<version>.dmg` and
+   `appcast.json` attached as release assets.
+
+**Why `appcast.json`'s name never changes.** The manifest is always named
+`appcast.json`, release after release — never versioned — because that's
+what makes GitHub's `releases/latest/download/appcast.json` URL always
+redirect to the manifest for the *most recent* release, without the
+running app needing to know a version number in advance
+(`UpdateFetcher.manifestURLString`). The DMG, by contrast, IS versioned
+(`VPNSwitch-<version>.dmg`) so multiple releases' DMGs can coexist as
+separate assets. Do not "fix" this asymmetry.
+
+All release artefacts (`app/build/VPNSwitch.app`, the DMG, `appcast.json`)
+live under `app/build`, which is gitignored — nothing under it is ever
+committed.
+
+**Bootstrap note.** The very first Developer-ID-signed build has to be
+installed by hand with `bin/install-vpn-switch.sh` (Section 3(d)) — a
+previously-installed ad-hoc build has no self-updater capable of pulling
+it in (ad-hoc signatures always fail the notarization gate; see
+"Updating" above). After that first hand-installed Developer-ID build is
+in place, every later release is picked up by the app's own automatic or
+manual update check — you do not need to run `install-vpn-switch.sh`
+again just to pick up a new version.
+
+**Development.** Day-to-day build/test, independent of the release
+pipeline above:
+
+```bash
+make build   # swift build --package-path app/VPNSwitch
+make test    # swift test --package-path app/VPNSwitch
+```
+
+CI (`.github/workflows/ci.yml`) runs the same build and test on
+`macos-latest` for every push/PR to `main`, plus a shell syntax check
+(`bash -n bin/*.sh lib/*.sh`).

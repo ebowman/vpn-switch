@@ -21,6 +21,11 @@ import UserNotifications
 /// needing to disable itself to prevent overlap (see dns-config-cr9.3); a
 /// second click while one is in flight coalesces into the queue per the
 /// rules documented on `ActionQueue`.
+///
+/// Also runs a periodic background update check (dns-config-8v7.7, see
+/// `UpdateSchedule`): silent on failure, never modal, never activates the
+/// app, and never auto-installs -- a newer version only ever surfaces as
+/// menu content via `availableUpdate`.
 @MainActor
 final class AppModel: ObservableObject {
     @Published var status: VPNStatus = VPNStatus()
@@ -44,6 +49,22 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(notifyOnExternalChanges, forKey: Self.notifyKey)
         }
     }
+    /// User preference: run the periodic background update check at all
+    /// (dns-config-8v7.7). Persisted in UserDefaults; default on, mirroring
+    /// `notifyOnExternalChanges`'s pattern above. Turning this off does not
+    /// clear an `availableUpdate` already surfaced; it only stops future
+    /// background checks from running.
+    @Published var autoUpdateCheckEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(autoUpdateCheckEnabled, forKey: UpdateSchedule.autoCheckEnabledKey)
+        }
+    }
+    /// A newer version discovered by the background check (or by a manual
+    /// "Check for Updates…" -- see note on `checkForUpdates()`), not yet
+    /// dismissed via "Skip This Version" and not equal to a previously
+    /// skipped version. `nil` when there is nothing to surface. Set only by
+    /// `backgroundCheck()`/`skipAvailableUpdate()`, never directly by UI.
+    @Published private(set) var availableUpdate: UpdateManifest? = nil
 
     static let pollIntervalKey = "pollIntervalSeconds"
     static let notifyKey = "notifyOnExternalChanges"
@@ -66,6 +87,11 @@ final class AppModel: ObservableObject {
     /// concurrent Process invocations.
     private var pollInFlight = false
     private var pollTask: Task<Void, Never>?
+    /// Background update-check loop (dns-config-8v7.7), started/stopped
+    /// alongside `pollTask` in `startPolling()`/`stopPolling()`. Runs on its
+    /// own schedule (see `UpdateSchedule`), independent of the status poll
+    /// interval.
+    private var updateCheckTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
     /// Set true for the duration of a self-initiated refresh/toggle so the
     /// notification logic below can tell "I changed this" apart from "it
@@ -107,6 +133,7 @@ final class AppModel: ObservableObject {
 
     init() {
         notifyOnExternalChanges = (UserDefaults.standard.object(forKey: Self.notifyKey) as? Bool) ?? true
+        autoUpdateCheckEnabled = (UserDefaults.standard.object(forKey: UpdateSchedule.autoCheckEnabledKey) as? Bool) ?? true
         queue = ActionQueue(
             autoDrain: true,
             statusProvider: { [unowned self] in self.status },
@@ -120,12 +147,36 @@ final class AppModel: ObservableObject {
     /// more than once for a MenuBarExtra).
     func startPolling() {
         guard pollTask == nil else { return }
+        // Sync the control scripts from the bundle (if a newer VERSION is
+        // shipped, or they're missing) before the first poll ever runs a
+        // stale vpn-ctl.sh. Synchronous: a handful of small file copies.
+        _ = ScriptBundle.syncIfNeeded()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.pollTick()
                 let interval = Self.pollInterval()
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+        }
+        updateCheckTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(UpdateSchedule.initialDelay * 1_000_000_000))
+            while !Task.isCancelled {
+                guard let self else { return }
+                let defaults = UserDefaults.standard
+                let lastCheck = defaults.object(forKey: UpdateSchedule.lastCheckKey) as? Date
+                let override = defaults.object(forKey: UpdateSchedule.intervalOverrideKey) as? Double
+                let interval = UpdateSchedule.effectiveInterval(override: override)
+                if UpdateSchedule.shouldCheck(
+                    now: Date(),
+                    lastCheck: lastCheck,
+                    interval: interval,
+                    enabled: self.autoUpdateCheckEnabled
+                ) {
+                    await self.backgroundCheck()
+                }
+                let sleepInterval = min(interval, UpdateSchedule.maxEvaluationSleep)
+                try? await Task.sleep(nanoseconds: UInt64(sleepInterval * 1_000_000_000))
             }
         }
         if wakeObserver == nil {
@@ -144,6 +195,19 @@ final class AppModel: ObservableObject {
                     // hosts file should be re-rendered against current
                     // reality after a sleep/wake cycle.
                     self?.forceLANDNSSync(reason: "wake")
+                    guard let self else { return }
+                    let defaults = UserDefaults.standard
+                    let lastCheck = defaults.object(forKey: UpdateSchedule.lastCheckKey) as? Date
+                    let override = defaults.object(forKey: UpdateSchedule.intervalOverrideKey) as? Double
+                    let interval = UpdateSchedule.effectiveInterval(override: override)
+                    if UpdateSchedule.shouldCheck(
+                        now: Date(),
+                        lastCheck: lastCheck,
+                        interval: interval,
+                        enabled: self.autoUpdateCheckEnabled
+                    ) {
+                        await self.backgroundCheck()
+                    }
                 }
             }
         }
@@ -155,6 +219,8 @@ final class AppModel: ObservableObject {
     func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+        updateCheckTask?.cancel()
+        updateCheckTask = nil
         if let observer = wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             wakeObserver = nil
@@ -222,6 +288,97 @@ final class AppModel: ObservableObject {
     /// stale intent that would otherwise run on the next drain.
     func discardPendingActions() {
         queue.discardPending()
+    }
+
+    /// Common teardown performed before this process is about to go away,
+    /// whether via the "Quit" menu item or via the "Install and Relaunch"
+    /// update path (dns-config-8v7.6): stop the polling timer/wake observer
+    /// so nothing outlives the app, discard any not-yet-started queued
+    /// intents so nothing new starts as we're going down, and terminate any
+    /// vpn-ctl.sh child already in flight so no child outlives the app
+    /// under launchd. Does NOT itself call `NSApplication.terminate` --
+    /// callers do that afterward once any of their own irreversible
+    /// pre-termination work (e.g. `UpdateInstallerRunner.launchSwap`
+    /// launching the detached swap script) has also succeeded.
+    func prepareForTermination() {
+        stopPolling()
+        discardPendingActions()
+        VPNCtl.terminateAllInFlight()
+    }
+
+    /// Entry point for the "Check for Updates…" menu item. Routed as a
+    /// plain call (NOT through `queue`/`ActionQueue`) since it does not
+    /// invoke vpn-ctl.sh and must not be coalesced with or blocked by
+    /// nord/tailscale toggle intents.
+    func checkForUpdates() {
+        UpdateChecker.checkForUpdates(beforeTerminate: { [weak self] in
+            self?.prepareForTermination()
+        })
+    }
+
+    /// One background update check, run periodically from `startPolling()`'s
+    /// `updateCheckTask` loop and from the wake observer (dns-config-8v7.7).
+    ///
+    /// SILENT ON FAILURE: any error (network, malformed manifest, etc) is
+    /// only NSLog'd -- never surfaced via `headerMessage`, an alert, or
+    /// `NSApp.activate`, and `lastUpdateCheck` is deliberately left
+    /// untouched on failure so the next scheduling evaluation retries
+    /// promptly (bounded by `UpdateSchedule.maxEvaluationSleep`) rather than
+    /// waiting a full `effectiveInterval` after a transient failure.
+    ///
+    /// On success, `lastUpdateCheck` is stamped with `now` regardless of
+    /// whether the fetched version is newer, and `availableUpdate` is set
+    /// from `UpdateSchedule.visibleUpdate(result:skippedVersion:)` -- which
+    /// may clear a previously-set `availableUpdate` if the server now
+    /// reports `.upToDate` (e.g. the release was pulled).
+    func backgroundCheck() async {
+        guard let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+              !currentVersion.isEmpty else {
+            return
+        }
+        let result: UpdateCheckResult
+        do {
+            result = try await UpdateFetcher.checkForUpdate(currentVersion: currentVersion)
+        } catch {
+            NSLog("VPNSwitch: update check failed: %@", UpdateChecker.describeFetchError(error))
+            return
+        }
+        UserDefaults.standard.set(Date(), forKey: UpdateSchedule.lastCheckKey)
+        let skippedVersion = UserDefaults.standard.string(forKey: UpdateSchedule.skippedVersionKey)
+        availableUpdate = UpdateSchedule.visibleUpdate(result: result, skippedVersion: skippedVersion)
+    }
+
+    /// Entry point for the "Install Update…" menu item shown when
+    /// `availableUpdate` is set. Routed through `UpdateChecker.installUpdate`
+    /// -- which shows the confirm alert and activates the app -- because
+    /// unlike the background check itself, this is reached only via a
+    /// deliberate user click, so a modal confirmation here is appropriate.
+    func installAvailableUpdate() {
+        guard let manifest = availableUpdate else { return }
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        Task {
+            await UpdateChecker.installUpdate(
+                manifest: manifest,
+                currentVersion: currentVersion,
+                beforeTerminate: { [weak self] in
+                    self?.prepareForTermination()
+                }
+            )
+        }
+    }
+
+    /// Entry point for the "Skip This Version" menu item: dismisses
+    /// `availableUpdate` and records its version as skipped so future
+    /// background checks stay silent for that exact version
+    /// (`UpdateSchedule.visibleUpdate`). Sticky across relaunches (stored in
+    /// UserDefaults) and NOT cleared by a later manual "Check for
+    /// Updates…" -- only superseded when a strictly different (e.g. newer)
+    /// version is later fetched, since `visibleUpdate` compares version
+    /// strings for equality only.
+    func skipAvailableUpdate() {
+        guard let manifest = availableUpdate else { return }
+        UserDefaults.standard.set(manifest.latestVersion, forKey: UpdateSchedule.skippedVersionKey)
+        availableUpdate = nil
     }
 
     /// Opens the Tailscale app (used by the "Open Tailscale…" menu item

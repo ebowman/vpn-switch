@@ -1,0 +1,195 @@
+import Foundation
+
+/// Errors surfaced by `UpdateFetcher`.
+///
+/// None of these ever crash the app — every failure mode from "no network"
+/// to "malformed JSON" to "manifest URL doesn't even parse" is represented
+/// here so callers (the "Check for Updates…" UI) can show a clear, specific
+/// message instead of the app dying or hanging.
+enum UpdateFetchError: Error, Equatable, Sendable {
+    /// The manifest URL string itself failed to parse as a `URL`.
+    case invalidManifestURL(String)
+
+    /// The manifest request failed at the transport level (no network,
+    /// DNS failure, timeout, etc). The associated string is
+    /// `(error as NSError).localizedDescription` from the underlying
+    /// `URLSession` error.
+    case network(String)
+
+    /// The manifest response was not HTTP or did not carry a 2xx status.
+    case badResponse(status: Int)
+
+    /// The manifest response body could not be decoded as `UpdateManifest`
+    /// JSON. The associated string is a human-readable description of the
+    /// decoding failure.
+    case malformedManifest(String)
+
+    /// The DMG download failed at the transport level.
+    case downloadFailed(String)
+
+    /// The DMG download response was not HTTP or did not carry a 2xx
+    /// status.
+    case downloadBadResponse(status: Int)
+}
+
+/// The outcome of checking for an update.
+enum UpdateCheckResult: Equatable, Sendable {
+    /// The fetched manifest's version is not newer than the running app's
+    /// version (per `UpdateManifest.isNewer(than:)`, which fails closed on
+    /// any unparseable version).
+    case upToDate(manifest: UpdateManifest)
+
+    /// The fetched manifest describes a strictly newer version.
+    case updateAvailable(manifest: UpdateManifest)
+}
+
+/// Fetches the update manifest and, when a newer version is available,
+/// downloads the DMG it describes.
+///
+/// This type performs ONLY networking and JSON decoding — it never installs
+/// or verifies anything. `UpdateInstaller.verify(dmgURL:manifest:)` (a
+/// separate, already-existing security boundary — see that type's doc
+/// comment) MUST be called on whatever this type downloads before the DMG
+/// is used for anything destructive. This type does not call `verify` itself
+/// so that boundary is never duplicated or drifted from here.
+enum UpdateFetcher {
+
+    /// The base URL this app fetches its update manifest and DMGs from.
+    ///
+    /// This is the ONLY place in the app that hardcodes a repository
+    /// identity. If the repo is ever renamed or moved, change it here and
+    /// keep it in step with `origin` — a stale value here means the app
+    /// silently fetches a 404 and never offers an update again.
+    ///
+    /// `UpdateInstaller.pinnedDMGHost` and `pinnedDMGPathPrefix`
+    /// independently pin the DMG download host and path to
+    /// `github.com/ebowman/vpn-switch/releases/download/` regardless of this
+    /// constant, so a malicious manifest still cannot smuggle a DMG from
+    /// anywhere else even if this value were ever wrong — see that type's
+    /// doc comment.
+    static let manifestURLString = "https://github.com/ebowman/vpn-switch/releases/latest/download/appcast.json"
+
+    /// The `URLSession` used by default for update checks and downloads.
+    ///
+    /// Built from `.default` (rather than `.shared`) with explicit, finite
+    /// timeouts: a background "check for updates" call must never hang the
+    /// app indefinitely waiting on a stalled connection.
+    static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 300
+        return URLSession(configuration: configuration)
+    }()
+
+    /// Fetches the manifest and compares it against `currentVersion`
+    /// (expected to be `Bundle.main.CFBundleShortVersionString` or
+    /// equivalent — this type never reads `Bundle` itself, mirroring
+    /// `UpdateManifest.isNewer(than:)`'s own contract).
+    ///
+    /// - Parameters:
+    ///   - currentVersion: the running app's version string.
+    ///   - session: injected for testability; defaults to `defaultSession`.
+    /// - Returns: `.upToDate` or `.updateAvailable`, wrapping the fetched
+    ///   manifest either way, so callers can still show its `notes`/
+    ///   `latestVersion` even when there is nothing to install.
+    /// - Throws: `UpdateFetchError` for every failure mode — malformed
+    ///   manifest URL, no network, non-2xx response, or undecodable JSON.
+    ///   Never crashes.
+    static func checkForUpdate(
+        currentVersion: String,
+        session: URLSession = defaultSession
+    ) async throws -> UpdateCheckResult {
+        let manifest = try await fetchManifest(session: session)
+        if manifest.isNewer(than: currentVersion) {
+            return .updateAvailable(manifest: manifest)
+        }
+        return .upToDate(manifest: manifest)
+    }
+
+    /// Fetches and decodes the manifest at `manifestURLString`.
+    ///
+    /// Separated from `checkForUpdate` so tests can exercise fetch/decode
+    /// failures directly without needing a real `currentVersion` comparison
+    /// to also succeed.
+    static func fetchManifest(session: URLSession = defaultSession) async throws -> UpdateManifest {
+        guard let url = URL(string: manifestURLString) else {
+            throw UpdateFetchError.invalidManifestURL(manifestURLString)
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(from: url)
+        } catch {
+            throw UpdateFetchError.network((error as NSError).localizedDescription)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateFetchError.badResponse(status: -1)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            throw UpdateFetchError.badResponse(status: http.statusCode)
+        }
+
+        do {
+            return try JSONDecoder().decode(UpdateManifest.self, from: data)
+        } catch {
+            throw UpdateFetchError.malformedManifest(String(describing: error))
+        }
+    }
+
+    /// Downloads `manifest.dmgURL` to a fresh, unique location under
+    /// `NSTemporaryDirectory()` and returns its `file://` URL.
+    ///
+    /// This performs NO verification of the downloaded bytes — the caller
+    /// MUST pass the returned URL to `UpdateInstaller.verify(dmgURL:
+    /// manifest:)` before doing anything else with it. This function
+    /// deliberately does not itself validate `manifest.dmgURL`'s scheme/
+    /// host either; `UpdateInstaller.verify` already does that validation
+    /// BEFORE any I/O in its own implementation (see
+    /// `UpdateInstaller.validateManifestDMGURL`), and duplicating it here
+    /// would risk the two checks drifting apart. This function will
+    /// therefore itself throw `UpdateFetchError.invalidManifestURL` if
+    /// `manifest.dmgURL` fails to even parse as a `URL` (necessary just to
+    /// perform the download), but does not attempt to duplicate the
+    /// scheme/host pinning that `verify` owns.
+    ///
+    /// - Returns: a `file://` URL to the downloaded (NOT YET VERIFIED) DMG.
+    /// - Throws: `UpdateFetchError` on any transport or HTTP-status failure.
+    static func downloadDMG(
+        manifest: UpdateManifest,
+        session: URLSession = defaultSession
+    ) async throws -> URL {
+        guard let remoteURL = URL(string: manifest.dmgURL) else {
+            throw UpdateFetchError.invalidManifestURL(manifest.dmgURL)
+        }
+
+        let destination = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("VPNSwitchUpdate-\(UUID().uuidString).dmg")
+
+        let tempDownloadURL: URL
+        let response: URLResponse
+        do {
+            (tempDownloadURL, response) = try await session.download(from: remoteURL)
+        } catch {
+            throw UpdateFetchError.downloadFailed((error as NSError).localizedDescription)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            try? FileManager.default.removeItem(at: tempDownloadURL)
+            throw UpdateFetchError.downloadBadResponse(status: -1)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            try? FileManager.default.removeItem(at: tempDownloadURL)
+            throw UpdateFetchError.downloadBadResponse(status: http.statusCode)
+        }
+
+        do {
+            try FileManager.default.moveItem(at: tempDownloadURL, to: destination)
+        } catch {
+            throw UpdateFetchError.downloadFailed((error as NSError).localizedDescription)
+        }
+
+        return destination
+    }
+}
