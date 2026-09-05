@@ -5,7 +5,7 @@ import Testing
 /// Tests for `UpdateInstallerRunner.writeSwapScript(text:)` and
 /// `UpdateSwapError`.
 ///
-/// `launchSwap(dmgURL:beforeTerminate:)` itself is NOT tested here: on
+/// `launchSwap(dmgURL:expectedSHA256:beforeTerminate:)` itself is NOT tested here: on
 /// success it calls `NSApp.terminate(nil)`, which would tear down the test
 /// process. `writeSwapScript(text:)` is factored out precisely so the
 /// script-writing step (the only part of `launchSwap` that can fail before

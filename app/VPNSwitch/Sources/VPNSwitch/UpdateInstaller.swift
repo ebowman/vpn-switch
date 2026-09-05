@@ -23,6 +23,16 @@ enum UpdateVerificationError: Error, Equatable, Sendable {
     /// notarized.
     case notarizationFailed
 
+    /// `codesign --verify -R=<designatedRequirement>` did not exit 0 for
+    /// the downloaded DMG — it is not signed by the pinned Team ID
+    /// (`UpdateInstaller.pinnedTeamID`). `spctl` notarization alone accepts
+    /// any Apple developer's notarized artifact; this gate additionally
+    /// requires the artifact to carry VPN Switch's own Developer ID
+    /// signature, so a GitHub/release-account compromise alone cannot ship
+    /// an update — the attacker would also need the Developer ID signing
+    /// key.
+    case identityMismatch
+
     /// The DMG could not be read at all (e.g. missing file).
     case unreadableFile(String)
 }
@@ -30,30 +40,39 @@ enum UpdateVerificationError: Error, Equatable, Sendable {
 /// Verifies a downloaded update DMG before it is ever installed.
 ///
 /// THIS IS THE WHOLE SECURITY STORY for VPNSwitch's self-update feature.
-/// `verify(dmgURL:manifest:)` throws unless BOTH of the following
+/// `verify(dmgURL:manifest:)` throws unless ALL THREE of the following
 /// independently hold:
 ///
 /// 1. The DMG's streaming SHA-256 digest matches `manifest.dmgSHA256`.
 /// 2. `spctl -a -t open --context context:primary-signature` exits 0 for the
 ///    DMG, i.e. it is Developer-ID signed AND notarized by Apple.
+/// 3. `codesign --verify -R=<designatedRequirement>` exits 0 for the DMG,
+///    i.e. it is signed specifically by VPN Switch's own pinned Team ID
+///    (`pinnedTeamID`) — not merely by *some* notarized Developer ID.
 ///
-/// Neither check is sufficient alone. A matching digest only proves the file
-/// is byte-for-byte what the manifest described — and the manifest itself
-/// arrives over the network, so an attacker who can serve a malicious
-/// manifest can make the digest "match" whatever they want. Passing
-/// notarization only proves the file is *some* legitimately Apple-notarized
-/// binary — not that it is genuinely the update this app asked for. Only
-/// the conjunction of "matches the manifest we fetched" AND "is a real,
-/// notarized Developer-ID artifact" is meaningful.
+/// None of the three checks is sufficient alone. A matching digest only
+/// proves the file is byte-for-byte what the manifest described — and the
+/// manifest itself arrives over the network, so an attacker who can serve a
+/// malicious manifest can make the digest "match" whatever they want.
+/// Passing notarization only proves the file is *some* legitimately
+/// Apple-notarized binary from *any* Apple developer account — not that it
+/// is genuinely the update this app asked for. That gap is exactly what the
+/// Team ID pin closes: even if an attacker compromises the GitHub release
+/// (stolen token, account takeover) and ships a manifest pointing at their
+/// own notarized DMG, that DMG will not satisfy the designated requirement
+/// unless they also possess VPN Switch's actual Developer ID signing key.
+/// Only the conjunction of "matches the manifest we fetched" AND "is a
+/// real, notarized Developer-ID artifact" AND "is signed by our own Team
+/// ID" is meaningful.
 ///
-/// Do NOT simplify this type and do NOT make either gate optional.
+/// Do NOT simplify this type and do NOT make any gate optional.
 ///
-/// Both checks are evaluated before either is judged: the notarization
-/// closure runs, and only then are the digest and notarization results
-/// tested. That ordering is deliberate — it avoids leaking, through timing,
-/// which of the two gates rejected an artifact. Do not "optimise" it into a
-/// short-circuit that skips the notarization check when the digest already
-/// failed.
+/// All three checks are evaluated before any is judged: the notarization
+/// and identity closures both run, and only then are the digest,
+/// notarization, and identity results tested. That ordering is deliberate
+/// — it avoids leaking, through timing, which of the gates rejected an
+/// artifact. Do not "optimise" it into a short-circuit that skips a check
+/// when an earlier one already failed.
 enum UpdateInstaller {
 
     /// The only host VPNSwitch will ever fetch a DMG from.
@@ -75,6 +94,31 @@ enum UpdateInstaller {
     /// `github.com`) means a malicious manifest cannot point at another
     /// project's release asset on the same host.
     static let pinnedDMGPathPrefix = "/ebowman/vpn-switch/releases/download/"
+
+    /// The only Developer ID Team ID VPNSwitch will ever accept an update
+    /// DMG from.
+    ///
+    /// `spctl -a -t open --context context:primary-signature` (see
+    /// `defaultNotarizationCheck`) only proves an artifact is Developer-ID
+    /// signed AND notarized by Apple — it accepts that from ANY Apple
+    /// developer account, not just this project's own. Trust in the update
+    /// path would otherwise reduce entirely to "whoever can write to the
+    /// `ebowman/vpn-switch` GitHub releases" (TLS-to-GitHub plus a manifest
+    /// with a matching digest), because a manifest and a notarized DMG are
+    /// both things an attacker who compromises that GitHub account (stolen
+    /// token, account takeover) could produce under their OWN notarized
+    /// Developer ID. Pinning this Team ID closes that gap: even a fully
+    /// compromised release pipeline cannot ship an update unless the
+    /// attacker also possesses this project's actual Developer ID signing
+    /// key.
+    static let pinnedTeamID = "Y5SB82BPYL"
+
+    /// The `codesign -R` designated-requirement string that pins
+    /// `pinnedTeamID`. Shared verbatim between `defaultIdentityCheck` (via
+    /// `codesign --verify`) and `UpdateSwapScript.generate`, which embeds
+    /// this same string into the generated shell script so the post-mount
+    /// re-verification step checks the identical requirement.
+    static let designatedRequirement = "anchor apple generic and certificate leaf[subject.OU] = \"\(pinnedTeamID)\""
 
     /// Bytes read per streaming digest chunk. A DMG can be tens of MB; this
     /// app runs as a background menu-bar process, so the whole file must
@@ -102,11 +146,16 @@ enum UpdateInstaller {
     ///   - notarizationCheck: Injected so tests can substitute a fake
     ///     notarization result without shelling out to `spctl` or needing a
     ///     real signed artifact. Defaults to the real `spctl` invocation.
+    ///   - identityCheck: Injected so tests can substitute a fake Team ID
+    ///     identity result without shelling out to `codesign` or needing a
+    ///     real Developer-ID-signed artifact. Defaults to the real
+    ///     `codesign --verify -R=<designatedRequirement>` invocation.
     /// - Throws: `UpdateVerificationError` describing which gate failed.
     nonisolated static func verify(
         dmgURL: URL,
         manifest: UpdateManifest,
-        notarizationCheck: (URL) throws -> Bool = defaultNotarizationCheck
+        notarizationCheck: (URL) throws -> Bool = defaultNotarizationCheck,
+        identityCheck: (URL) throws -> Bool = defaultIdentityCheck
     ) throws {
         try validateManifestDMGURL(manifest.dmgURL)
 
@@ -114,6 +163,7 @@ enum UpdateInstaller {
         let digestMatches = actualDigest.caseInsensitiveCompare(manifest.dmgSHA256) == .orderedSame
 
         let notarized = try notarizationCheck(dmgURL)
+        let identityMatches = try identityCheck(dmgURL)
 
         guard digestMatches else {
             throw UpdateVerificationError.digestMismatch(
@@ -123,6 +173,9 @@ enum UpdateInstaller {
         }
         guard notarized else {
             throw UpdateVerificationError.notarizationFailed
+        }
+        guard identityMatches else {
+            throw UpdateVerificationError.identityMismatch
         }
     }
 
@@ -178,6 +231,33 @@ enum UpdateInstaller {
         process.arguments = [
             "-a", "-t", "open",
             "--context", "context:primary-signature",
+            dmgURL.path
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    /// The real identity check: runs
+    /// `codesign --verify -R=<designatedRequirement> <dmg>` and returns
+    /// whether it exited 0.
+    ///
+    /// This proves the DMG's primary signature satisfies the designated
+    /// requirement pinning `pinnedTeamID` — i.e. it is signed specifically
+    /// by VPN Switch's own Developer ID, not merely by some other
+    /// Apple-notarized Developer ID (which `defaultNotarizationCheck` alone
+    /// would accept). The `-R=` form (value directly attached, not passed
+    /// as a separate argv element) is required by `codesign`'s argument
+    /// parsing.
+    nonisolated static func defaultIdentityCheck(_ dmgURL: URL) throws -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = [
+            "--verify",
+            "-R=\(designatedRequirement)",
             dmgURL.path
         ]
         process.standardOutput = FileHandle.nullDevice

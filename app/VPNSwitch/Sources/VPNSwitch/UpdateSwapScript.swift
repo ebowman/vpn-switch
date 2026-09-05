@@ -75,34 +75,64 @@ enum UpdateSwapScript {
     ///     run the real end-to-end swap against a throwaway, non-launchable
     ///     test fixture without spawning a fake "app" process as a side
     ///     effect of the test.
+    ///   - requirement: the `codesign -R` designated-requirement string the
+    ///     mounted bundle must satisfy before the script will touch
+    ///     anything installed. Defaults to
+    ///     `UpdateInstaller.designatedRequirement` (the Team ID pin). This
+    ///     re-checks, on the MOUNTED volume at swap time, the same identity
+    ///     already checked by `UpdateInstaller.verify` on the downloaded
+    ///     DMG at download time — closing the TOCTOU window between
+    ///     `verify()` returning and this detached script actually running
+    ///     (the whole parent-exit wait loop) during which the DMG at
+    ///     `dmgPath` could in principle have been replaced or the mount
+    ///     could expose different bundle content than was hashed.
+    ///   - expectedSHA256: when non-nil, the script re-hashes `$DMG_PATH`
+    ///     immediately before `hdiutil attach` and refuses to proceed if it
+    ///     no longer matches — the other half of closing that same TOCTOU
+    ///     window, for the DMG file itself rather than the bundle inside
+    ///     it. `nil` (the default) omits this check entirely, which the
+    ///     LIVE integration tests rely on for fixtures built without a
+    ///     precomputed digest.
     ///
-    /// Every one of the four string values is interpolated through
-    /// `shQuote(_:)` exactly once. The script:
+    /// Every one of the four core string values (`dmgPath`, `parentPID`,
+    /// `installDir`, `bundleName`) is interpolated through `shQuote(_:)`
+    /// exactly once; `requirement` and `expectedSHA256` (when present) are
+    /// too. The script:
     ///   1. Spins on `kill -0 "$PID"` (once per 0.5s) until the parent
     ///      process has actually exited, so the running `.app` bundle is
     ///      never touched while still in use.
-    ///   2. `hdiutil attach -nobrowse -noverify -plist` the DMG, capturing
+    ///   2. When `expectedSHA256` was supplied, re-hashes `$DMG_PATH` with
+    ///      `shasum -a 256` and refuses to proceed (app untouched, nothing
+    ///      mounted) if it no longer matches what was verified.
+    ///   3. `hdiutil attach -nobrowse -noverify -plist` the DMG, capturing
     ///      its plist output to a temp file.
-    ///   3. Parses the mount point out of that plist with `python3` (never
+    ///   4. Parses the mount point out of that plist with `python3` (never
     ///      by grepping `/Volumes` — fragile and ambiguous with concurrent
     ///      mounts). If `python3` is unavailable, or parsing fails to
     ///      produce a mount point, the script logs and exits NONZERO
     ///      *before* doing anything destructive — it never falls back to
     ///      guessing a path.
-    ///   4. Refuses to proceed if the installed bundle
+    ///   5. Re-verifies the MOUNTED new bundle
+    ///      (`"$MOUNT_POINT/$BUNDLE_NAME"`) against `$REQUIREMENT` with
+    ///      `/usr/bin/codesign --verify --deep --strict -R="$REQUIREMENT"`
+    ///      (absolute path, so a `PATH` hijack cannot substitute a fake
+    ///      `codesign`), and aborts (detach, exit 1, installed bundle
+    ///      untouched) if it does not satisfy the pinned Team ID
+    ///      requirement.
+    ///   6. Refuses to proceed if the installed bundle
     ///      (`"$INSTALL_DIR/$BUNDLE_NAME"`) does not already exist as a
     ///      directory — guards against a wrong `installDir` turning the
     ///      next step into a no-op `rm -rf` of the wrong place followed by
     ///      installing into a location nothing will ever launch from.
-    ///   5. `rm -rf` the OLD installed bundle
+    ///   7. `rm -rf` the OLD installed bundle
     ///      (`"$INSTALL_DIR/$BUNDLE_NAME"`) — the single irreversible step
     ///      in this entire pipeline.
-    ///   6. `cp -R` the new bundle from the mounted DMG into `installDir` in
+    ///   8. `cp -R` the new bundle from the mounted DMG into `installDir` in
     ///      its place — same path, same signing identity, so TCC/login-item/
     ///      keychain-ACL grants survive (do not change this to a "fresh
     ///      install" elsewhere).
-    ///   7. `hdiutil detach` the mounted volume.
-    ///   8. `open` the freshly-installed bundle — unless `relaunch` is
+    ///   9. `hdiutil detach` the mounted volume.
+    ///   10. `open` the freshly-installed bundle — unless `relaunch` is
     ///      `false`, in which case this step is skipped and a log line is
     ///      emitted in its place.
     ///
@@ -118,12 +148,15 @@ enum UpdateSwapScript {
         parentPID: Int32,
         installDir: String,
         bundleName: String,
-        relaunch: Bool = true
+        relaunch: Bool = true,
+        requirement: String = UpdateInstaller.designatedRequirement,
+        expectedSHA256: String? = nil
     ) -> String {
         let qDMG = shQuote(dmgPath)
         let qPID = shQuote(String(parentPID))
         let qInstallDir = shQuote(installDir)
         let qBundleName = shQuote(bundleName)
+        let qRequirement = shQuote(requirement)
 
         let relaunchStep: String
         if relaunch {
@@ -137,6 +170,28 @@ enum UpdateSwapScript {
             """
         }
 
+        let expectedSHA256Assignment: String
+        if let expectedSHA256 {
+            expectedSHA256Assignment = "EXPECTED_SHA256=\(shQuote(expectedSHA256))"
+        } else {
+            expectedSHA256Assignment = ""
+        }
+
+        let digestCheckStep: String
+        if expectedSHA256 != nil {
+            digestCheckStep = """
+
+            echo "[vpn-switch-update] re-checking DMG digest before attach"
+            ACTUAL_SHA256="$(/usr/bin/shasum -a 256 "$DMG_PATH" | /usr/bin/awk '{print $1}')"
+            if [ "$(echo "$ACTUAL_SHA256" | tr 'A-Z' 'a-z')" != "$(echo "$EXPECTED_SHA256" | tr 'A-Z' 'a-z')" ]; then
+                echo "[vpn-switch-update] refusing to install: DMG digest changed since verification"
+                exit 1
+            fi
+            """
+        } else {
+            digestCheckStep = ""
+        }
+
         return """
         #!/bin/sh
         set -e
@@ -145,6 +200,8 @@ enum UpdateSwapScript {
         PID=\(qPID)
         INSTALL_DIR=\(qInstallDir)
         BUNDLE_NAME=\(qBundleName)
+        REQUIREMENT=\(qRequirement)
+        \(expectedSHA256Assignment)
 
         # Refuse to run at all with a target that could make the rm -rf below
         # catastrophic. With an empty BUNDLE_NAME, "$MOUNT_POINT/$BUNDLE_NAME"
@@ -174,7 +231,7 @@ enum UpdateSwapScript {
             sleep 0.5
         done
         echo "[vpn-switch-update] parent exited, proceeding"
-
+        \(digestCheckStep)
         PLIST_PATH="$(mktemp -t vpn-switch-update-plist)"
         echo "[vpn-switch-update] attaching $DMG_PATH"
         if ! hdiutil attach -nobrowse -noverify -plist "$DMG_PATH" > "$PLIST_PATH"; then
@@ -210,6 +267,23 @@ enum UpdateSwapScript {
         NEW_BUNDLE="$MOUNT_POINT/$BUNDLE_NAME"
         if [ ! -d "$NEW_BUNDLE" ]; then
             echo "[vpn-switch-update] $NEW_BUNDLE not found on mounted volume, aborting"
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            exit 1
+        fi
+
+        # Re-verify the MOUNTED bundle against the pinned Team ID
+        # requirement, using an absolute path to codesign so a PATH hijack
+        # cannot substitute a fake one. This closes the verify-then-install
+        # TOCTOU gap: UpdateInstaller.verify already checked the DOWNLOADED
+        # DMG before this detached script ever ran, but the whole
+        # parent-exit wait loop above is a window during which the file at
+        # DMG_PATH (or, once mounted, the bundle inside it) could in
+        # principle differ from what was verified. Re-checking here, on the
+        # actual bundle about to be installed, means that window cannot be
+        # used to smuggle in an unsigned or wrong-Team-ID bundle.
+        echo "[vpn-switch-update] verifying $NEW_BUNDLE satisfies designated requirement"
+        if ! /usr/bin/codesign --verify --deep --strict -R="$REQUIREMENT" "$NEW_BUNDLE"; then
+            echo "[vpn-switch-update] refusing to install: $NEW_BUNDLE does not satisfy the designated requirement (Team ID pin)"
             hdiutil detach "$MOUNT_POINT" -quiet || true
             exit 1
         fi

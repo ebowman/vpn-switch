@@ -3,14 +3,15 @@ import Foundation
 import Testing
 @testable import VPNSwitch
 
-/// Tests for `UpdateInstaller.verify(dmgURL:manifest:notarizationCheck:)` —
-/// the whole security story for VPNSwitch's self-update feature.
+/// Tests for
+/// `UpdateInstaller.verify(dmgURL:manifest:notarizationCheck:identityCheck:)`
+/// — the whole security story for VPNSwitch's self-update feature.
 ///
-/// The two gates (digest match, notarization) are independent: this suite
-/// deliberately covers all four combinations so neither gate can silently
-/// become optional. It also validates the manifest URL scheme/host/path
-/// pinning, which runs before any I/O. Every assertion here is non-vacuous
-/// by construction.
+/// The three gates (digest match, notarization, Team ID identity) are
+/// independent: this suite deliberately covers combinations of them so no
+/// gate can silently become optional. It also validates the manifest URL
+/// scheme/host/path pinning, which runs before any I/O. Every assertion
+/// here is non-vacuous by construction.
 struct UpdateInstallerTests {
 
     // MARK: - Fixtures
@@ -50,7 +51,12 @@ struct UpdateInstallerTests {
         let m = manifest(sha256: sha256Hex(content))
 
         // Must not throw.
-        try UpdateInstaller.verify(dmgURL: fileURL, manifest: m) { _ in true }
+        try UpdateInstaller.verify(
+            dmgURL: fileURL,
+            manifest: m,
+            notarizationCheck: { _ in true },
+            identityCheck: { _ in true }
+        )
     }
 
     @Test func matchingDigestOverMultipleChunksSucceeds() throws {
@@ -68,7 +74,12 @@ struct UpdateInstallerTests {
         let fileURL = try writeTempFile(content)
         let m = manifest(sha256: sha256Hex(content))
 
-        try UpdateInstaller.verify(dmgURL: fileURL, manifest: m) { _ in true }
+        try UpdateInstaller.verify(
+            dmgURL: fileURL,
+            manifest: m,
+            notarizationCheck: { _ in true },
+            identityCheck: { _ in true }
+        )
     }
 
     @Test func digestIsCaseInsensitiveMatch() throws {
@@ -76,7 +87,12 @@ struct UpdateInstallerTests {
         let fileURL = try writeTempFile(content)
         let m = manifest(sha256: sha256Hex(content).uppercased())
 
-        try UpdateInstaller.verify(dmgURL: fileURL, manifest: m) { _ in true }
+        try UpdateInstaller.verify(
+            dmgURL: fileURL,
+            manifest: m,
+            notarizationCheck: { _ in true },
+            identityCheck: { _ in true }
+        )
     }
 
     // MARK: - The two gates are independent; neither is sufficient alone
@@ -98,7 +114,12 @@ struct UpdateInstallerTests {
         let m = manifest(sha256: sha256Hex(content))
 
         #expect(throws: UpdateVerificationError.self) {
-            try UpdateInstaller.verify(dmgURL: fileURL, manifest: m) { _ in false }
+            try UpdateInstaller.verify(
+                dmgURL: fileURL,
+                manifest: m,
+                notarizationCheck: { _ in false },
+                identityCheck: { _ in true }
+            )
         }
     }
 
@@ -135,11 +156,66 @@ struct UpdateInstallerTests {
         let m = manifest(sha256: sha256Hex(content))
 
         do {
-            try UpdateInstaller.verify(dmgURL: fileURL, manifest: m) { _ in false }
+            try UpdateInstaller.verify(
+                dmgURL: fileURL,
+                manifest: m,
+                notarizationCheck: { _ in false },
+                identityCheck: { _ in true }
+            )
             Issue.record("expected verify to throw")
         } catch let error as UpdateVerificationError {
             #expect(error == .notarizationFailed)
         }
+    }
+
+    /// The identity closure must run even when digest and notarization both
+    /// pass -- the Team ID pin is not skippable just because the other two
+    /// gates are satisfied.
+    @Test func identityFailureThrowsEvenWhenDigestAndNotarizationPass() throws {
+        let content = Data("real content".utf8)
+        let fileURL = try writeTempFile(content)
+        let m = manifest(sha256: sha256Hex(content))
+
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: fileURL,
+                manifest: m,
+                notarizationCheck: { _ in true },
+                identityCheck: { _ in false }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .identityMismatch)
+        }
+    }
+
+    /// The identity closure must run even when the digest already
+    /// mismatches -- all three gates are evaluated before any is judged.
+    @Test func identityCheckIsInvokedEvenWhenDigestMismatches() throws {
+        let content = Data("real content".utf8)
+        let fileURL = try writeTempFile(content)
+        let wrongDigest = sha256Hex(Data("different content".utf8))
+        let m = manifest(sha256: wrongDigest)
+
+        var identityCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: fileURL,
+                manifest: m,
+                notarizationCheck: { _ in true },
+                identityCheck: { _ in
+                    identityCheckWasCalled = true
+                    return true
+                }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            guard case .digestMismatch = error else {
+                Issue.record("expected .digestMismatch, got \(error)")
+                return
+            }
+        }
+        #expect(identityCheckWasCalled)
     }
 
     /// The notarization closure must run even when the digest already
@@ -276,7 +352,12 @@ struct UpdateInstallerTests {
             sha256: sha256Hex(content)
         )
 
-        try UpdateInstaller.verify(dmgURL: fileURL, manifest: m) { _ in true }
+        try UpdateInstaller.verify(
+            dmgURL: fileURL,
+            manifest: m,
+            notarizationCheck: { _ in true },
+            identityCheck: { _ in true }
+        )
     }
 
     // MARK: - Real spctl closure (default parameter) does not crash on a bogus path
@@ -289,5 +370,24 @@ struct UpdateInstallerTests {
         // that is obviously not a signed, notarized disk image.
         let result = try UpdateInstaller.defaultNotarizationCheck(fileURL)
         #expect(result == false)
+    }
+
+    // MARK: - Real codesign closure (default parameter) does not crash on a bogus path
+
+    @Test func defaultIdentityCheckReturnsFalseForNonSignedFile() throws {
+        let content = Data("not a real dmg".utf8)
+        let fileURL = try writeTempFile(content)
+        // Exercise the real (non-injected) codesign-backed default via the
+        // public entry point, confirming it fails closed for a plain file
+        // that is obviously not signed at all, let alone by the pinned
+        // Team ID.
+        let result = try UpdateInstaller.defaultIdentityCheck(fileURL)
+        #expect(result == false)
+    }
+
+    // MARK: - The designated requirement constant
+
+    @Test func designatedRequirementPinsExpectedTeamID() {
+        #expect(UpdateInstaller.designatedRequirement == "anchor apple generic and certificate leaf[subject.OU] = \"Y5SB82BPYL\"")
     }
 }

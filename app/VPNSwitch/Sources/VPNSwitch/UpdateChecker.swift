@@ -25,7 +25,7 @@ enum UpdateChecker {
     /// Entry point for the "Check for Updates…" menu item.
     ///
     /// - Parameter beforeTerminate: forwarded through to
-    ///   `UpdateInstallerRunner.launchSwap(dmgURL:beforeTerminate:)` if the
+    ///   `UpdateInstallerRunner.launchSwap(dmgURL:expectedSHA256:beforeTerminate:)` if the
     ///   user confirms installing an available update -- see that type's
     ///   doc comment for why this must run immediately before termination
     ///   rather than being folded into this function eagerly.
@@ -92,7 +92,7 @@ enum UpdateChecker {
         }
 
         do {
-            try UpdateInstallerRunner.launchSwap(dmgURL: dmgURL, beforeTerminate: beforeTerminate)
+            try UpdateInstallerRunner.launchSwap(dmgURL: dmgURL, expectedSHA256: manifest.dmgSHA256, beforeTerminate: beforeTerminate)
             // launchSwap runs beforeTerminate() and calls
             // NSApp.terminate(nil) on success; execution does not
             // meaningfully continue past this point.

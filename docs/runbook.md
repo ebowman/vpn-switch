@@ -303,6 +303,24 @@ need to see what an install actually did. If verification fails for either
 reason, the downloaded file is discarded and the installed app is left
 completely untouched — nothing partial or broken is ever put in place.
 
+**The updater also pins the signing identity, not just notarization.**
+Passing Apple's notarization check only proves a DMG is Developer-ID signed
+and notarized by *some* Apple developer account — not necessarily VPN
+Switch's own. So on top of the SHA-256 and notarization checks above, both
+the downloaded DMG and the `.app` inside it (re-checked again, right before
+install, on the mounted volume) must satisfy a designated requirement
+pinning Team ID `Y5SB82BPYL`. This closes the gap where a compromised
+GitHub account (a stolen release token, for example) could otherwise ship a
+manifest pointing at an attacker's own notarized DMG: without VPN Switch's
+actual Developer ID signing key, that DMG cannot satisfy the Team ID pin
+and is refused. A DMG or app that is ad-hoc signed, unsigned, or signed by
+a different Team ID is rejected: for the downloaded DMG, the app reports
+the identity failure in its verification error and never launches the
+helper; for the mounted app, the helper writes `refusing to install:
+<bundle> does not satisfy the designated requirement (Team ID pin)` to
+`/tmp/vpn-switch-update.log`, detaches the image, and exits. In both cases
+the installed app is left untouched.
+
 **Ad-hoc/dev builds cannot self-update.** This verification is by design:
 a build that isn't signed with the project's Developer ID and notarized by
 Apple will always fail the notarization check, so `bin/install-vpn-switch.sh`

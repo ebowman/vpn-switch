@@ -391,4 +391,160 @@ struct UpdateSwapScriptTests {
         let count = script.components(separatedBy: "rm -rf \"$OLD_BUNDLE\"").count - 1
         #expect(count == 1)
     }
+
+    // MARK: - Team ID re-verification of the mounted bundle (dns-config-407)
+
+    @Test func generatedScriptReVerifiesMountedBundleBetweenAttachAndRemove() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app"
+        )
+
+        guard let attachRange = script.range(of: "hdiutil attach"),
+              let codesignRange = script.range(of: "/usr/bin/codesign --verify --deep --strict -R=\"$REQUIREMENT\""),
+              let rmRange = script.range(of: "rm -rf \"$OLD_BUNDLE\"") else {
+            Issue.record("expected hdiutil attach, the codesign re-verify step, and rm -rf to all be present")
+            return
+        }
+        // Non-vacuous: fails if the re-verify step were ever moved ahead of
+        // the attach (nothing to verify yet) or behind the destructive
+        // rm -rf (too late to prevent it) -- see UpdateSwapScript.generate's
+        // doc comment step 5.
+        #expect(attachRange.lowerBound < codesignRange.lowerBound)
+        #expect(codesignRange.lowerBound < rmRange.lowerBound)
+    }
+
+    @Test func generatedScriptDefaultRequirementEqualsUpdateInstallerConstant() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app"
+        )
+        let expectedAssignment = "REQUIREMENT=\(UpdateSwapScript.shQuote(UpdateInstaller.designatedRequirement))"
+        #expect(script.contains(expectedAssignment))
+        // Embedded exactly once.
+        #expect(script.components(separatedBy: expectedAssignment).count == 2)
+    }
+
+    @Test func generatedScriptEmbedsCustomRequirementShQuotedExactlyOnce() {
+        let customRequirement = "anchor apple generic and certificate leaf[subject.OU] = \"TESTTEAMID\""
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            requirement: customRequirement
+        )
+        let expectedAssignment = "REQUIREMENT=\(UpdateSwapScript.shQuote(customRequirement))"
+        #expect(script.contains(expectedAssignment))
+        #expect(script.components(separatedBy: expectedAssignment).count == 2)
+
+        // The raw (unquoted) value must never appear outside the quoted
+        // assignment -- same discipline as the dangerous-path check above.
+        let scriptWithoutQuotedOccurrence = script.replacingOccurrences(of: expectedAssignment, with: "")
+        #expect(!scriptWithoutQuotedOccurrence.contains(customRequirement))
+    }
+
+    /// A requirement string containing a single quote or a `$(...)`
+    /// command-substitution payload must still round-trip safely through a
+    /// real shell -- reuses the same ground-truth technique as the
+    /// `shQuote` round-trip tests above, applied to the REQUIREMENT
+    /// assignment line specifically.
+    @Test func generatedScriptEmbedsRequirementWithSingleQuoteSafely() throws {
+        let trickyRequirement = "anchor apple generic and certificate leaf[subject.OU] = \"it's odd\""
+        let quoted = UpdateSwapScript.shQuote(trickyRequirement)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "printf '%s' \(quoted)"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let roundTripped = String(data: data, encoding: .utf8) ?? ""
+        #expect(roundTripped == trickyRequirement)
+
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            requirement: trickyRequirement
+        )
+        #expect(script.contains("REQUIREMENT=\(quoted)"))
+    }
+
+    @Test func generatedScriptEmbedsRequirementWithCommandSubstitutionSafely() throws {
+        let probePath = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("UpdateSwapScriptTests-requirement-injection-probe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: probePath) }
+
+        let trickyRequirement = "$(touch \(probePath.path))"
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            requirement: trickyRequirement
+        )
+        let quoted = UpdateSwapScript.shQuote(trickyRequirement)
+        #expect(script.contains("REQUIREMENT=\(quoted)"))
+
+        // Actually run the generated script (it will fail early for
+        // unrelated reasons -- no real DMG at /tmp/update.dmg -- but the
+        // REQUIREMENT assignment line itself must not execute the
+        // substitution as a side effect of merely being assigned).
+        let scriptURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("UpdateSwapScriptTests-requirement-injection-\(UUID().uuidString).sh")
+        defer { try? FileManager.default.removeItem(at: scriptURL) }
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [scriptURL.path]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+
+        #expect(!FileManager.default.fileExists(atPath: probePath.path))
+    }
+
+    @Test func generatedScriptContainsShasumCheckWhenExpectedSHA256Provided() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            expectedSHA256: "abc123"
+        )
+        #expect(script.contains("EXPECTED_SHA256=\(UpdateSwapScript.shQuote("abc123"))"))
+        #expect(script.contains("shasum"))
+        #expect(script.contains("refusing to install: DMG digest changed since verification"))
+
+        guard let shasumRange = script.range(of: "shasum"),
+              let attachRange = script.range(of: "hdiutil attach") else {
+            Issue.record("expected both shasum check and hdiutil attach to be present")
+            return
+        }
+        #expect(shasumRange.lowerBound < attachRange.lowerBound)
+    }
+
+    @Test func generatedScriptOmitsShasumWhenExpectedSHA256IsNil() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            expectedSHA256: nil
+        )
+        #expect(!script.contains("shasum"))
+        #expect(!script.contains("EXPECTED_SHA256"))
+    }
 }

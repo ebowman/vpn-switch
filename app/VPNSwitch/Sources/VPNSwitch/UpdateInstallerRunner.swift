@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import os
 
-/// Errors from `UpdateInstallerRunner.launchSwap(dmgURL:beforeTerminate:)`.
+/// Errors from `UpdateInstallerRunner.launchSwap(dmgURL:expectedSHA256:beforeTerminate:)`.
 ///
 /// Every case here is thrown BEFORE anything irreversible happens — the
 /// installed bundle is only ever touched by the detached script AFTER this
@@ -26,7 +26,7 @@ enum UpdateSwapError: Error {
 ///
 /// ## Order of operations is the safety property
 ///
-/// `UpdateInstallerRunner.launchSwap(dmgURL:beforeTerminate:)` is called
+/// `UpdateInstallerRunner.launchSwap(dmgURL:expectedSHA256:beforeTerminate:)` is called
 /// ONLY after `UpdateInstaller.verify(dmgURL:manifest:)` has already
 /// succeeded (see `UpdateChecker`, the caller) — that is this whole
 /// feature's security boundary, and it is not re-checked or re-validated
@@ -99,6 +99,13 @@ enum UpdateInstallerRunner {
     ///     `UpdateInstaller.verify(dmgURL:manifest:)`. This function does
     ///     not re-verify it -- callers must not call this with an
     ///     unverified DMG.
+    ///   - expectedSHA256: the digest `UpdateInstaller.verify` already
+    ///     confirmed for this DMG (i.e. `manifest.dmgSHA256`), forwarded
+    ///     into the generated script so it can re-check the DMG on disk
+    ///     immediately before `hdiutil attach` -- see
+    ///     `UpdateSwapScript.generate`'s doc comment for why this closes a
+    ///     TOCTOU window. No default: callers must be explicit about
+    ///     whether a re-check digest is available.
     ///   - beforeTerminate: run after the detached script has been
     ///     successfully launched but before `NSApp.terminate(nil)` -- see
     ///     the type's doc comment for why this ordering matters.
@@ -107,7 +114,7 @@ enum UpdateInstallerRunner {
     ///   `beforeTerminate` is NOT called) in every throwing case --
     ///   `beforeTerminate()` and `NSApp.terminate(nil)` are only reached
     ///   after the launch itself has succeeded.
-    static func launchSwap(dmgURL: URL, beforeTerminate: () -> Void) throws {
+    static func launchSwap(dmgURL: URL, expectedSHA256: String?, beforeTerminate: () -> Void) throws {
         let bundleURL = Bundle.main.bundleURL
         let installDir = bundleURL.deletingLastPathComponent().path
         let bundleName = bundleURL.lastPathComponent
@@ -117,7 +124,8 @@ enum UpdateInstallerRunner {
             parentPID: ProcessInfo.processInfo.processIdentifier,
             installDir: installDir,
             bundleName: bundleName,
-            relaunch: true
+            relaunch: true,
+            expectedSHA256: expectedSHA256
         )
 
         let scriptURL = try writeSwapScript(text: scriptText)
