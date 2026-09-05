@@ -16,6 +16,7 @@ import Testing
 /// `manifestVersionNotNewerReturnsUpToDate` is only meaningful alongside
 /// `manifestVersionNewerReturnsUpdateAvailable` — together they prove the
 /// comparison direction, not just that SOME result comes back).
+@Suite(.serialized)
 struct UpdateFetcherTests {
 
     private func manifestJSON(
@@ -255,8 +256,10 @@ struct UpdateFetcherTests {
         )
 
         let tempDir = NSTemporaryDirectory()
-        let before = try FileManager.default.contentsOfDirectory(atPath: tempDir)
-            .filter { $0.hasPrefix("VPNSwitchUpdate-") }
+        let before = Set(
+            try FileManager.default.contentsOfDirectory(atPath: tempDir)
+                .filter { $0.hasPrefix("VPNSwitchUpdate-") }
+        )
 
         do {
             _ = try await UpdateFetcher.downloadDMG(manifest: manifest, session: session)
@@ -265,9 +268,14 @@ struct UpdateFetcherTests {
             #expect(error == .downloadBadResponse(status: 500))
         }
 
-        let after = try FileManager.default.contentsOfDirectory(atPath: tempDir)
-            .filter { $0.hasPrefix("VPNSwitchUpdate-") }
-        #expect(after.count == before.count)
+        let after = Set(
+            try FileManager.default.contentsOfDirectory(atPath: tempDir)
+                .filter { $0.hasPrefix("VPNSwitchUpdate-") }
+        )
+        // Robust against sibling tests concurrently creating/removing their
+        // own VPNSwitchUpdate-* files: assert no NEW file was left behind by
+        // this call, rather than comparing raw counts.
+        #expect(after.subtracting(before).isEmpty)
     }
 
     @Test func downloadDMGInvalidURLThrows() async throws {
