@@ -190,20 +190,25 @@ struct MenuContentView: View {
 
             Divider()
 
-            Button("Quit") {
-                model.stopPolling()
-                // Discard any not-yet-started queued intents so teardown
-                // doesn't start a new vpn-ctl.sh process right as we're
-                // quitting -- only a command already in flight (handled by
-                // terminateAllInFlight below) can still be running.
-                model.discardPendingActions()
-                // Belt-and-braces for the case where a poll or toggle is
-                // synchronously blocked inside VPNCtl.run right now (Task
-                // cancellation from stopPolling cannot interrupt a blocking
-                // waitpid/read loop) -- without this, quitting mid-run would
-                // orphan that child (and any grandchildren) under launchd.
-                VPNCtl.terminateAllInFlight()
-                NSApplication.shared.terminate(nil)
+            Group {
+                Button("Check for Updates…") {
+                    model.checkForUpdates()
+                }
+
+                Button("Quit") {
+                    // prepareForTermination() covers everything Quit needs
+                    // to tear down cleanly (stop polling/wake observer,
+                    // discard not-yet-started queued intents, and terminate
+                    // any vpn-ctl.sh child already in flight so no child
+                    // outlives the app under launchd) -- see AppModel for
+                    // the full rationale. It's also shared with the
+                    // "Check for Updates…" -> "Install and Relaunch" path
+                    // (dns-config-8v7.6), which needs the exact same
+                    // teardown immediately before its own irreversible
+                    // termination.
+                    model.prepareForTermination()
+                    NSApplication.shared.terminate(nil)
+                }
             }
         }
         // Polling is started from the MenuBarExtra label's onAppear (see

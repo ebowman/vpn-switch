@@ -228,6 +228,32 @@ final class AppModel: ObservableObject {
         queue.discardPending()
     }
 
+    /// Common teardown performed before this process is about to go away,
+    /// whether via the "Quit" menu item or via the "Install and Relaunch"
+    /// update path (dns-config-8v7.6): stop the polling timer/wake observer
+    /// so nothing outlives the app, discard any not-yet-started queued
+    /// intents so nothing new starts as we're going down, and terminate any
+    /// vpn-ctl.sh child already in flight so no child outlives the app
+    /// under launchd. Does NOT itself call `NSApplication.terminate` --
+    /// callers do that afterward once any of their own irreversible
+    /// pre-termination work (e.g. `UpdateInstallerRunner.launchSwap`
+    /// launching the detached swap script) has also succeeded.
+    func prepareForTermination() {
+        stopPolling()
+        discardPendingActions()
+        VPNCtl.terminateAllInFlight()
+    }
+
+    /// Entry point for the "Check for Updates…" menu item. Routed as a
+    /// plain call (NOT through `queue`/`ActionQueue`) since it does not
+    /// invoke vpn-ctl.sh and must not be coalesced with or blocked by
+    /// nord/tailscale toggle intents.
+    func checkForUpdates() {
+        UpdateChecker.checkForUpdates(beforeTerminate: { [weak self] in
+            self?.prepareForTermination()
+        })
+    }
+
     /// Opens the Tailscale app (used by the "Open Tailscale…" menu item
     /// shown when ts=NeedsLogin). Does not attempt to drive any login flow
     /// itself -- that's left entirely to the human via the Tailscale app.
