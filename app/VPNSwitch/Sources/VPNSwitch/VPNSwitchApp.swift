@@ -6,6 +6,9 @@ struct VPNSwitchApp: App {
     @StateObject private var model = AppModel()
 
     init() {
+        if CommandLine.arguments.contains("--selftest-queue") {
+            SelfTest.runQueueCasesAndExit()
+        }
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.runAndExit()
         }

@@ -79,4 +79,181 @@ enum SelfTest {
             if !result.stderr.isEmpty { print("  stderr: \(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
         }
     }
+
+    /// Headless canned cases for ActionQueue (dns-config-cr9.2): exercises
+    /// the coalescing/idempotency rules documented on ActionQueue directly,
+    /// with a fake status provider and a fake async runner -- no Process
+    /// calls, no live vpn-ctl.sh, safe to run anywhere.
+    @MainActor
+    private final class QueueTestHarness {
+        var status = VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail")
+        var log: [String] = []
+        var inFlight = 0
+        var maxInFlight = 0
+        var failed = false
+        /// Set by a case to enqueue something else from inside the runner
+        /// (simulates a click arriving mid-command), keyed by the args of
+        /// the command that should trigger it.
+        var midRunHook: ((VPNCommand, ActionQueue) -> Void)?
+
+        var queue: ActionQueue!
+
+        init() {
+            queue = ActionQueue(
+                autoDrain: false,
+                statusProvider: { [unowned self] in self.status },
+                runner: { [unowned self] cmd in
+                    self.inFlight += 1
+                    self.maxInFlight = max(self.maxInFlight, self.inFlight)
+                    self.midRunHook?(cmd, self.queue)
+                    self.log.append(cmd.args.joined(separator: " "))
+                    self.inFlight -= 1
+                }
+            )
+        }
+
+        func reset(status newStatus: VPNStatus? = nil) {
+            log = []
+            midRunHook = nil
+            if let newStatus { status = newStatus }
+        }
+
+        func check(_ name: String, expected: [String]) {
+            if log != expected {
+                failed = true
+                print("FAIL \(name): expected \(expected) got \(log)")
+            } else if queue.isBusy {
+                failed = true
+                print("FAIL \(name): expected isBusy == false after drain, got true")
+            } else if queue.activeCommand != nil {
+                failed = true
+                print("FAIL \(name): expected activeCommand == nil after drain, got \(String(describing: queue.activeCommand))")
+            } else {
+                print("PASS \(name)")
+            }
+        }
+    }
+
+    static func runQueueCasesAndExit() -> Never {
+        Task { @MainActor in
+            let h = QueueTestHarness()
+
+            // A: dedupe -- same state enqueued twice collapses to one command.
+            h.queue.enqueue(.nord, .on)
+            h.queue.enqueue(.nord, .on)
+            await h.queue.drain()
+            h.check("A dedupe", expected: ["nord on"])
+
+            // B: last-wins -- opposite state before drain replaces the pending
+            // entry. With nord=up the .on would have been pruned anyway, but
+            // it is replaced before drain runs; the .off is not satisfied
+            // (nord is up, not down), so it runs.
+            h.reset(status: VPNStatus.parse("nord=up ts=Stopped web=ok streamy=fail"))
+            h.queue.enqueue(.nord, .on)
+            h.queue.enqueue(.nord, .off)
+            await h.queue.drain()
+            h.check("B last-wins", expected: ["nord off"])
+
+            // C: merge -- same state on both targets becomes one `all` command.
+            h.reset(status: VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail"))
+            h.queue.enqueue(.nord, .on)
+            h.queue.enqueue(.tailscale, .on)
+            await h.queue.drain()
+            h.check("C merge (on)", expected: ["all on"])
+
+            h.reset(status: VPNStatus.parse("nord=up ts=Running web=ok streamy=fail"))
+            h.queue.enqueueAll(.off)
+            await h.queue.drain()
+            h.check("C merge (off)", expected: ["all off"])
+
+            // D: split -- mixed states become two `.set` commands, nord first.
+            h.reset(status: VPNStatus.parse("nord=down ts=Running web=ok streamy=fail"))
+            h.queue.enqueue(.nord, .on)
+            h.queue.enqueue(.tailscale, .off)
+            await h.queue.drain()
+            h.check("D split", expected: ["nord on", "tailscale off"])
+
+            // E: mid-run click -- enqueuing while "all on" is executing is
+            // picked up by the next loop iteration, never concurrently. The
+            // fake runner also mutates status mid-command here, mimicking
+            // the real runner re-running status after each mutation --
+            // that's what leaves the queued nord off unpruned on the next
+            // loop iteration (status becomes nord=up, so nord=off is not
+            // yet satisfied and still needs to run).
+            h.reset(status: VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail"))
+            h.queue.enqueueAll(.on)
+            h.midRunHook = { cmd, queue in
+                if cmd == .setAll(.on) {
+                    h.status = VPNStatus.parse("nord=up ts=Running web=ok streamy=fail")
+                    queue.enqueue(.nord, .off)
+                }
+            }
+            await h.queue.drain()
+            h.check("E mid-run click", expected: ["all on", "nord off"])
+            if h.maxInFlight > 1 {
+                h.failed = true
+                print("FAIL E mid-run click: max concurrency expected 1 got \(h.maxInFlight)")
+            }
+
+            // E2: mid-run click, but the requested state is already
+            // satisfied by the time drain re-checks status -- the mid-run
+            // duplicate is pruned rather than re-run. Documents the
+            // idempotency guarantee end to end.
+            h.reset(status: VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail"))
+            h.queue.enqueueAll(.on)
+            h.midRunHook = { cmd, queue in
+                if cmd == .setAll(.on) {
+                    h.status = VPNStatus.parse("nord=up ts=Running web=ok streamy=fail")
+                    queue.enqueue(.nord, .on)
+                }
+            }
+            await h.queue.drain()
+            h.check("E2 mid-run click already satisfied", expected: ["all on"])
+            if h.maxInFlight > 1 {
+                h.failed = true
+                print("FAIL E2 mid-run click already satisfied: max concurrency expected 1 got \(h.maxInFlight)")
+            }
+
+            // F: prune -- requests already satisfied by live status are dropped.
+            h.reset(status: VPNStatus.parse("nord=up ts=Stopped web=ok streamy=fail"))
+            h.queue.enqueue(.nord, .on)
+            await h.queue.drain()
+            h.check("F prune (satisfied on)", expected: [])
+
+            h.reset(status: VPNStatus.parse("nord=down ts=Starting web=ok streamy=fail"))
+            h.queue.enqueue(.tailscale, .off)
+            await h.queue.drain()
+            h.check("F prune (not pruned, unknown state)", expected: ["tailscale off"])
+
+            // G: refresh -- bare refresh becomes `.status`; refresh alongside
+            // a mutation is subsumed by it.
+            h.reset(status: VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail"))
+            h.queue.enqueueRefresh()
+            await h.queue.drain()
+            h.check("G refresh alone", expected: ["status"])
+
+            h.reset(status: VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail"))
+            h.queue.enqueueRefresh()
+            h.queue.enqueue(.nord, .on)
+            await h.queue.drain()
+            h.check("G refresh subsumed", expected: ["nord on"])
+
+            // H: discard -- pending intents cleared before drain never run.
+            h.reset()
+            h.queue.enqueue(.nord, .on)
+            h.queue.discardPending()
+            await h.queue.drain()
+            h.check("H discard", expected: [])
+
+            // queuedLabels eyeball check (before draining).
+            h.reset()
+            h.queue.enqueue(.nord, .on)
+            h.queue.enqueue(.tailscale, .off)
+            print("queuedLabels: \(h.queue.queuedLabels)")
+            await h.queue.drain()
+
+            exit(h.failed ? 1 : 0)
+        }
+        dispatchMain()
+    }
 }
