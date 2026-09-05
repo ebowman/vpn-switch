@@ -26,8 +26,20 @@ extension Tag {
 /// coverage that proves the swap script's shell logic is correct as ACTUAL
 /// shell script text executed by a real shell — the `UpdateSwapScriptTests`
 /// suite only asserts on the generated string.
-@Suite(.tags(.live))
+/// `.serialized` forces this suite's tests to run one at a time (never
+/// concurrently with each other). Each test also builds its DMG with a
+/// unique `-volname` (see `uniqueVolumeName`), but concurrent runs would
+/// still race on `hdiutil attach`'s own mount-point allocation under
+/// `/Volumes`, so both defenses are kept belt-and-braces.
+@Suite(.serialized, .tags(.live))
 struct UpdateSwapScriptLiveIntegrationTests {
+
+    /// Returns a volume name guaranteed unique to this test invocation, so
+    /// concurrent (or accidentally re-ordered) test runs never collide on
+    /// the same `/Volumes/<name>` mount point.
+    private func uniqueVolumeName(_ base: String) -> String {
+        "\(base) \(UUID().uuidString.prefix(8))"
+    }
 
     /// Runs `/bin/sh <scriptURL>` to completion and returns (exit status,
     /// combined stdout+stderr).
@@ -110,7 +122,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
         // Build a real, minimal DMG containing a "VPN Switch.app" so the
         // script gets past the attach + NEW_BUNDLE-exists checks and reaches
         // the new missing-installed-bundle guard.
-        let volName = "VPN Switch Test Missing"
+        let volName = uniqueVolumeName("VPN Switch Test Missing")
         let dmgSourceDir = scratchRoot.appendingPathComponent("dmgsrc")
         let newBundleDir = dmgSourceDir.appendingPathComponent("VPN Switch.app/Contents")
         try FileManager.default.createDirectory(at: newBundleDir, withIntermediateDirectories: true)
@@ -179,7 +191,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
         // whose marker.txt differs from the old one, so the test can prove
         // the OLD bundle's contents are gone and the NEW bundle's contents
         // are in place after the swap — not just that "some bundle" exists.
-        let volName = "VPN Switch Test"
+        let volName = uniqueVolumeName("VPN Switch Test")
         let dmgSourceDir = scratchRoot.appendingPathComponent("dmgsrc")
         let newBundleDir = dmgSourceDir.appendingPathComponent("VPN Switch.app")
         try FileManager.default.createDirectory(at: newBundleDir.appendingPathComponent("Contents"), withIntermediateDirectories: true)
