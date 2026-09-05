@@ -178,12 +178,49 @@ Two independent toggles in the VPN Switch menu: **NordVPN** and
 **Tailscale**. Toggling one never implicitly touches the other — coexistence
 is the normal, supported state.
 
-**Turn All VPNs Off** brings both down in one click: NordVPN first, then
-Tailscale. The Tailscale disconnect always runs, even if the NordVPN
-disconnect fails, so a Nord failure never leaves Tailscale stranded up. The
-menu item is disabled while a switch is already in flight, or when neither
-VPN is currently on (nothing to do). CLI equivalent:
+### Turn All VPNs On / Turn All VPNs Off
+
+**Turn All VPNs On** and **Turn All VPNs Off** bring both up or down in one
+click: NordVPN first, then Tailscale, in both directions. The Tailscale
+half always runs, even if the NordVPN half fails, so a Nord failure never
+leaves Tailscale stranded up (on "off") or stops Tailscale from coming up
+(on "on"). CLI equivalents: `bash bin/vpn-ctl.sh all on` and
 `bash bin/vpn-ctl.sh all off`.
+
+No menu item — including these two — is ever disabled. Instead, clicks made
+while a switch is already running are queued and run one `vpn-ctl.sh`
+invocation at a time, in the order clicked. While a switch is in flight the
+menu header shows `Switching: <action>…`, and if further switches are
+waiting behind it, a `Queued: …` line lists them (a folded-in Refresh — see
+below — is not listed).
+
+The queue applies a few idempotency rules so rapid or repeated clicks don't
+pile up redundant work:
+
+- Clicking the same item again while it is already pending or running does
+  nothing extra.
+- Clicking the opposite state for the same VPN (e.g. NordVPN off, then on,
+  before the first has run) replaces the pending intent — only the latest
+  click for that target survives.
+- A NordVPN intent and a Tailscale intent that target the same state and
+  are **both still waiting** when the queue next picks up work collapse
+  into a single `all on` (or `all off`) invocation. **Turn All VPNs
+  On/Off** always produces one composite invocation this way; two separate
+  clicks (NordVPN, then Tailscale) usually run as two commands instead,
+  since the first is typically already running by the time the second is
+  clicked — the merge only happens if the first click was still waiting
+  behind something else when the second arrived.
+- A queued action already satisfied by the latest known status is skipped
+  when its turn comes up (nothing to do).
+- **Refresh** is queued like any other action. If a switch is already
+  pending or running, the refresh is folded into it — every switch
+  re-reads status when it finishes — so clicking Refresh while a switch is
+  in flight has no visible extra effect.
+
+Each click records the target state computed from what the menu displayed
+at the moment of the click, never a blind toggle — so a click's effect
+doesn't change based on what happens to the status while it's waiting in
+the queue.
 
 Menu bar icon (SF Symbol, from `app/VPNSwitch/Sources/VPNSwitch/MenuIcon.swift`):
 
@@ -292,10 +329,18 @@ One-shot, read-only full capture of DNS/network state to
 | 5 | Usage error (bad/missing subcommand or action) |
 | 6 | Another `vpn-ctl.sh` invocation holds the lock |
 
-For `all off`, the exit code is the first non-zero of (nord off, tailscale
-off) — 0 only if both succeeded — and on failure a one-line summary is
-printed to stderr naming which component(s) failed
-(`vpn-ctl: all off: nord=<ok|failed (exit N)> tailscale=<ok|failed (exit N)>`).
+For `all on` and `all off`, the exit code is the first non-zero of (nord,
+tailscale) for that direction — 0 only if both succeeded — and on failure a
+one-line summary is printed to stderr naming which component(s) failed:
+`vpn-ctl: all on: nord=<ok|failed (exit N)> tailscale=<ok|failed (exit N)>`
+(and the analogous `vpn-ctl: all off: nord=<ok|failed (exit N)>
+tailscale=<ok|failed (exit N)>` for `all off`).
+
+**Headless checks.** `VPNSwitch --selftest-queue` runs the app's canned
+menu-queue test cases against a fake runner — no `vpn-ctl.sh` invocation, no
+VPN side effects — useful for verifying the queueing/idempotency rules
+above without a live environment. **Warning:** the bare `--selftest` flag
+(no `-queue` suffix) is not headless — it performs a live `nord on`.
 
 ## 6. Troubleshooting
 
