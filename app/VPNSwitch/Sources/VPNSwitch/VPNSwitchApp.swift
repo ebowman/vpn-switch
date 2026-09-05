@@ -102,6 +102,9 @@ struct MenuContentView: View {
                 } else if let message = model.headerMessage {
                     Text(message)
                 }
+                if let update = model.availableUpdate {
+                    Text("Update available: \(update.latestVersion)")
+                }
             }
 
             if isAppTunnelError {
@@ -174,7 +177,10 @@ struct MenuContentView: View {
                 model.refresh()
             }
 
-            Toggle("Notify on external changes", isOn: $model.notifyOnExternalChanges)
+            Group {
+                Toggle("Notify on external changes", isOn: $model.notifyOnExternalChanges)
+                Toggle("Check for updates automatically", isOn: $model.autoUpdateCheckEnabled)
+            }
 
             Divider()
 
@@ -191,6 +197,18 @@ struct MenuContentView: View {
             Divider()
 
             Group {
+                if let update = model.availableUpdate {
+                    Group {
+                        Button("Install Update \(update.latestVersion)…") {
+                            model.installAvailableUpdate()
+                        }
+
+                        Button("Skip This Version") {
+                            model.skipAvailableUpdate()
+                        }
+                    }
+                }
+
                 Button("Check for Updates…") {
                     model.checkForUpdates()
                 }
