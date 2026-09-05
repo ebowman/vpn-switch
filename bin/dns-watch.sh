@@ -8,6 +8,7 @@
 #
 # Start this BEFORE flipping a VPN, let it run through the transition, then
 # read snapshots/<label>.log. Read-only; no sudo, no config changes.
+# snapshots/ is gitignored; its contents are local-only and never committed.
 set -u
 
 TS_BIN="/Applications/Tailscale.app/Contents/MacOS/Tailscale"

@@ -87,7 +87,7 @@ CI runs both plus a shell syntax check on every push/PR. Release process:
 | `app/` | VPN Switch, the SwiftUI menu bar app (`app/VPNSwitch/`). |
 | `config/` | `lan-hosts.conf` (LAN/tailnet address table) and the NordVPN IKEv2 root CA. |
 | `docs/` | Runbook, findings, ADRs, verification results, and background research. |
-| `snapshots/` | Captured evidence logs from `dns-watch.sh` / `dns-snapshot.sh` runs. |
+| `snapshots/` | Local-only evidence logs from `dns-watch.sh` / `dns-snapshot.sh` runs. Gitignored, never committed (contains tailnet and LAN details). |
 
 ## 5. Status and limits
 

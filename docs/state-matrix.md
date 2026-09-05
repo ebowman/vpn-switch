@@ -1,7 +1,8 @@
 # State matrix — what resolver #1 is, and what resolves, per VPN state
 
-Extracted from committed `snapshots/*.txt` (captured by `bin/dns-snapshot.sh`
-on this Mac, home LAN). Each cell is the literal observed value.
+Extracted from local `snapshots/*.txt` captures (captured by `bin/dns-snapshot.sh`
+on this Mac, home LAN, and kept on the maintainer's machine — not committed
+to the repository). Each cell is the literal observed value.
 
 | State | Snapshot | Captured | resolver #1 (`scutil --dns`) | nord-mode | bare `streamy` | bare `mac-mini` | `streamy.local` | Web |
 |---|---|---|---|---|---|---|---|---|
@@ -9,11 +10,11 @@ on this Mac, home LAN). Each cell is the literal observed value.
 | Tailscale on, **Nord IKEv2** on | `ts-on-nordikev2-on.txt` | 2026-08-16 12:5x | `100.100.100.100` (MagicDNS; Nord's `103.86.96.100` is #2) | ikev2(ipsec0) | 100.64.10.4 | 100.64.10.65 | 192.0.2.4 | ok |
 | Tailscale off, **Nord IKEv2** on | `ts-off-nordikev2-on.txt` | 2026-08-16 13:0x | `103.86.96.100` (Nord, public) | ikev2(ipsec0) | no answer (expected) | no answer (expected) | 192.0.2.4 | ok |
 | Tailscale off, **Nord APP** on | `ts-off-nord-on.txt` | 2026-08-16 00:39 | `100.64.0.2` (Nord app — inside CGNAT space) | app (pre-detection capture) | no answer (expected) | no answer (expected) | 192.0.2.4 | ok |
-| Tailscale on, **Nord APP** on | *(not captured as a snapshot — see `snapshots/ts-then-nord-2.log`, `openvpn-udp-nord.log`, `custom-dns-nord.log`)* | 2026-08-16 09:26–10:25 | `100.64.0.2` first; MagicDNS never consulted | app | FAIL | FAIL | ok | **FAIL** (total DNS loss; browser dead) — the unsupported state |
+| Tailscale on, **Nord APP** on | *(not captured as a snapshot — see local captures `snapshots/ts-then-nord-2.log`, `openvpn-udp-nord.log`, `custom-dns-nord.log`)* | 2026-08-16 09:26–10:25 | `100.64.0.2` first; MagicDNS never consulted | app | FAIL | FAIL | ok | **FAIL** (total DNS loss; browser dead) — the unsupported state |
 | Tailscale off, Nord off | `ts-off-nord-off.txt` | 2026-08-17 19:23 | `192.0.2.1` (router; search domain[0] `home.arpa`, `local` removed) | absent | 192.0.2.4 | 192.0.2.65 | 192.0.2.4 | ok |
 | Away (hotspot), any | — | NOT CAPTURED | — | — | — | — | — | — |
 
-The last "off/off" row is now CAPTURED: `snapshots/ts-off-nord-off.txt`
+The last "off/off" row is now CAPTURED locally: `snapshots/ts-off-nord-off.txt`
 (2026-08-17), taken after the `local` search-domain fix (`dns-config-g3u`)
 was applied — resolver #1 is `192.0.2.1` (the router) with search
 domain[0] `home.arpa` (`local` removed from the Wi-Fi search list); bare

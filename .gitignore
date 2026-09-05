@@ -12,3 +12,7 @@ config/nord-ikev2/*.env
 
 # macOS
 .DS_Store
+
+# Captured evidence from bin/dns-snapshot.sh / dns-watch.sh: local only, contains
+# tailnet/LAN details. Never committed (history purged 2026-09-05).
+snapshots/

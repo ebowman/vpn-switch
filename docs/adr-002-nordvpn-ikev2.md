@@ -41,11 +41,11 @@ The same address collision also produces a **routing** failure, tracked
 separately in `dns-config-lsy`: with the NordVPN app's tunnel up, Tailscale
 peer traffic and Tailscale's own control-plane connection to
 `controlplane.tailscale.com` degrade or die outright, independent of DNS.
-`snapshots/ts-then-nord-2.log` (committed) captures this directly: with the
+`snapshots/ts-then-nord-2.log` (local capture, not committed) captures this directly: with the
 app's tunnel started on top of a healthy Tailscale session, tailnet ping and
 tailnet DNS both fail within seconds of Nord coming up, while the WEB column
 (a real HTTPS fetch, the decisive signal per that log's own header) also
-goes bad. `snapshots/openvpn-udp-nord.log` (committed) shows the same
+goes bad. `snapshots/openvpn-udp-nord.log` (local capture, not committed) shows the same
 collapse pattern when the app is configured to use OpenVPN-UDP instead of
 NordLynx, ruling out "switch the app's own protocol setting" as a fix — the
 app's tunnel captures `100.64.0.0/10` addressing regardless of which

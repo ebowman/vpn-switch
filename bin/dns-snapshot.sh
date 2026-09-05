@@ -5,6 +5,7 @@
 #   label   optional snapshot label (default: "snapshot")
 #
 # Writes snapshots/<label>.txt and echoes the same report to stdout.
+# snapshots/ is gitignored; its contents are local-only and never committed.
 # Read-only: no sudo, no network/config mutation. Intentionally does NOT
 # use 'set -e' since probe commands are expected to fail without aborting
 # the run.

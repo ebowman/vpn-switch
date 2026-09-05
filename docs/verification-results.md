@@ -9,6 +9,8 @@ that row passes if web works and the failure is exactly that.
 Columns: `dns-verify` = `bin/dns-verify.sh` summary; `WEB` = HTTPS fetch
 (the decisive usability column); names = bare `streamy` / `mac-mini`.
 
+Evidence files under `snapshots/` are local captures kept by the maintainer, not committed to the repository (they contain tailnet and LAN details).
+
 | Row | nord (IKEv2) | tailscale | dns-verify | WEB | bare names | Verdict | Evidence |
 |---|---|---|---|---|---|---|---|
 | 1 | on | on | 6 passed, 0 failed, 0 skipped | ok(200) | 100.64.10.4 / 100.64.10.65 | **PASS** — the normal state | `snapshots/ts-on-nordikev2-on.txt`; `snapshots/soak-both-up-30min.log`; qsk.10 |
