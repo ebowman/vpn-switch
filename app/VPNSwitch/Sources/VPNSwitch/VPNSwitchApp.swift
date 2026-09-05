@@ -75,12 +75,17 @@ struct MenuContentView: View {
 
     var body: some View {
         Group {
-            if let missing = model.scriptMissingPath {
-                Text("vpn-ctl.sh not found at \(missing)")
-            } else if model.isSwitching {
-                Text("Switching…")
-            } else if let message = model.headerMessage {
-                Text(message)
+            Group {
+                if let missing = model.scriptMissingPath {
+                    Text("vpn-ctl.sh not found at \(missing)")
+                } else if model.isSwitching {
+                    Text("Switching: \(model.activeActionLabel ?? "…")…")
+                    if !model.queuedActionLabels.isEmpty {
+                        Text("Queued: " + model.queuedActionLabels.joined(separator: ", "))
+                    }
+                } else if let message = model.headerMessage {
+                    Text(message)
+                }
             }
 
             if isAppTunnelError {
@@ -106,33 +111,12 @@ struct MenuContentView: View {
 
             Divider()
 
-            // AX NOTE (dns-config-qsk.6 fold-in from qsk.5 review): these two
-            // toggle Buttons carry `.disabled(model.isSwitching)`, which is
-            // the real, authoritative guard -- runToggle() in AppModel also
-            // independently refuses to start a second toggle while one is
-            // in flight (`guard !isSwitching else { return }`), so a click
-            // that slips past the disabled UI state cannot cause overlapping
-            // vpn-ctl.sh invocations either way.
-            //
-            // Whether System Events ("enabled of menu item") reliably
-            // observes this disabled state during the in-flight window was
-            // spot-checked live (dns-config-qsk.6 verification) by toggling
-            // Tailscale and re-sampling `enabled of menu item "Tailscale"`
-            // via AppleScript immediately after the click. In practice a
-            // real vpn-ctl.sh tailscale toggle (esp. turning an
-            // already-authenticated Tailscale back on) can complete in well
-            // under a second -- faster than a second osascript round-trip
-            // takes to reopen the menu and re-read it -- so the sample
-            // consistently landed after isSwitching had already cleared and
-            // read back `true` (enabled) both times. This is inconclusive
-            // for the disabled window specifically, not a negative result:
-            // it does not demonstrate that AX fails to expose the disabled
-            // state, only that this particular black-box probe couldn't
-            // outrace a fast toggle to observe it. Documented here as a
-            // known limitation per the review's guidance rather than
-            // claimed as verified; the header's "Switching…" line plus the
-            // two independent code guards above are what this app actually
-            // relies on for correctness.
+            // None of the items below are ever disabled: each click records
+            // an absolute intent (target state captured from the currently
+            // displayed status) into AppModel's ActionQueue, which runs one
+            // vpn-ctl.sh invocation at a time and coalesces duplicate/
+            // opposite intents rather than relying on the UI to prevent
+            // overlap. See ActionQueue.swift for the coalescing rules.
             Button {
                 model.toggleNord()
             } label: {
@@ -143,7 +127,6 @@ struct MenuContentView: View {
                     Text("NordVPN")
                 }
             }
-            .disabled(model.isSwitching)
 
             Button {
                 model.toggleTailscale()
@@ -155,23 +138,25 @@ struct MenuContentView: View {
                     Text("Tailscale")
                 }
             }
-            .disabled(model.isSwitching)
 
-            // Disabled when a toggle is already in flight (same guard as
-            // the two toggles above), or when there is nothing on to turn
-            // off (both Nord and Tailscale already report off) -- avoids
-            // an always-live "off" action that would just re-run a no-op.
+            Button("Turn All VPNs On") {
+                model.turnAllOn()
+            }
+
+            // Always enabled, like every item above: both "Turn All" actions
+            // are idempotent no-ops when nothing needs to change, so there is
+            // no "nothing to turn off/on" state to disable for. This
+            // deliberately supersedes the open UX question raised in
+            // dns-config-5cn.
             Button("Turn All VPNs Off") {
                 model.turnAllOff()
             }
-            .disabled(model.isSwitching || (!model.status.nord.isOn && !model.status.ts.isOn))
 
             Divider()
 
             Button("Refresh") {
                 model.refresh()
             }
-            .disabled(model.isSwitching)
 
             Toggle("Notify on external changes", isOn: $model.notifyOnExternalChanges)
 
@@ -191,6 +176,11 @@ struct MenuContentView: View {
 
             Button("Quit") {
                 model.stopPolling()
+                // Discard any not-yet-started queued intents so teardown
+                // doesn't start a new vpn-ctl.sh process right as we're
+                // quitting -- only a command already in flight (handled by
+                // terminateAllInFlight below) can still be running.
+                model.discardPendingActions()
                 // Belt-and-braces for the case where a poll or toggle is
                 // synchronously blocked inside VPNCtl.run right now (Task
                 // cancellation from stopPolling cannot interrupt a blocking
