@@ -182,6 +182,40 @@ enum UpdateInstaller {
     /// Validates that `dmgURLString` parses as a URL, uses `https`, and
     /// points at the pinned GitHub releases host and path prefix. Throws
     /// before any I/O.
+    ///
+    /// The path-prefix check is deliberately defense-in-depth against dot-
+    /// segment traversal: Foundation's `URL.path` does NOT normalize `.`/`..`
+    /// components, so `.../releases/download/../../../evil/repo/...` would
+    /// still report a raw `.path` that starts with `pinnedDMGPathPrefix`
+    /// even though `.standardized.path` resolves to a completely different,
+    /// unpinned path (which is what GitHub itself would actually serve).
+    /// Several independent measures close this:
+    ///
+    /// 1. Any raw path component that is literally `.` or `..`, or any
+    ///    percent-encoded `%2e`/`%2E` sequence or backslash in the raw path,
+    ///    is rejected outright before path comparison even begins.
+    /// 2. The full `absoluteString` is rejected if it contains an encoded
+    ///    slash (`%2f`/`%2F`) or encoded backslash (`%5c`/`%5C`). A
+    ///    legitimate GitHub release asset URL never needs an encoded slash:
+    ///    it would otherwise let a component like `..%2f..%2fevil` decode
+    ///    (via `URL.path`) into fused-but-still-traversing segments such as
+    ///    `../../evil` that never appear as a literal `.`/`..` component in
+    ///    `pathComponents` and are not caught by check 1.
+    /// 3. The *decoded* `parsed.path` is independently scanned for `..`
+    ///    anywhere, or any component containing `..`, as a belt-and-braces
+    ///    check that does not depend on exactly how Foundation happens to
+    ///    split path components.
+    /// 4. The prefix check itself runs against `parsed.standardized.path`
+    ///    rather than the raw `parsed.path`, so even a traversal sequence
+    ///    that slipped past 1-3 would still be caught by resolving against
+    ///    the pin.
+    /// 5. A bare prefix match with nothing after it is also rejected -- a
+    ///    real DMG URL always has a version/filename segment following the
+    ///    prefix.
+    ///
+    /// Ordinary, non-traversal percent-encoding (e.g. `%20` for a space in a
+    /// filename) is left untouched -- only encoded slashes/backslashes and
+    /// literal/encoded dot-segments are rejected.
     nonisolated static func validateManifestDMGURL(_ dmgURLString: String) throws {
         guard let parsed = URL(string: dmgURLString),
               let scheme = parsed.scheme,
@@ -194,7 +228,47 @@ enum UpdateInstaller {
         guard host.lowercased() == pinnedDMGHost else {
             throw UpdateVerificationError.insecureDMGURL(dmgURLString)
         }
-        guard parsed.path.hasPrefix(pinnedDMGPathPrefix) else {
+
+        // Reject any dot-segment component outright, whether literal or
+        // percent-encoded, before ever comparing paths.
+        guard !parsed.pathComponents.contains(where: { $0 == "." || $0 == ".." }) else {
+            throw UpdateVerificationError.insecureDMGURL(dmgURLString)
+        }
+        let rawPath = parsed.path
+        guard !rawPath.lowercased().contains("%2e"),
+              !rawPath.contains("\\") else {
+            throw UpdateVerificationError.insecureDMGURL(dmgURLString)
+        }
+
+        // Reject encoded slashes/backslashes anywhere in the URL: a
+        // legitimate GitHub release asset URL never needs one, and an
+        // encoded slash lets a traversal segment like `..%2f..%2fevil`
+        // decode into `../../evil` inside a single fused path component,
+        // sidestepping the literal `.`/`..` component check above.
+        let lowerAbsolute = parsed.absoluteString.lowercased()
+        guard !lowerAbsolute.contains("%2f"),
+              !lowerAbsolute.contains("%5c") else {
+            throw UpdateVerificationError.insecureDMGURL(dmgURLString)
+        }
+
+        // Belt-and-braces: scan the decoded path itself for ".." anywhere,
+        // or any component containing "..", independent of how Foundation
+        // happens to split pathComponents.
+        guard !rawPath.contains(".."),
+              !rawPath.split(separator: "/").contains(where: { $0.contains("..") }) else {
+            throw UpdateVerificationError.insecureDMGURL(dmgURLString)
+        }
+
+        // Compare the *standardized* (dot-segment-resolved) path against the
+        // pin, not the raw path, so any traversal sequence that slipped past
+        // the checks above is still caught by resolving to where GitHub
+        // would actually route the request.
+        let standardizedPath = parsed.standardized.path
+        guard standardizedPath.hasPrefix(pinnedDMGPathPrefix) else {
+            throw UpdateVerificationError.insecureDMGURL(dmgURLString)
+        }
+        let remainder = standardizedPath.dropFirst(pinnedDMGPathPrefix.count)
+        guard !remainder.isEmpty else {
             throw UpdateVerificationError.insecureDMGURL(dmgURLString)
         }
     }

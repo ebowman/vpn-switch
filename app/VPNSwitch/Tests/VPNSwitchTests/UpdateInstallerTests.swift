@@ -340,6 +340,211 @@ struct UpdateInstallerTests {
         #expect(!notarizationCheckWasCalled)
     }
 
+    /// Dot-segment traversal in the raw path: `.path` does not normalize
+    /// `..`, so the naive `hasPrefix` check on the raw path would pass while
+    /// GitHub itself would route the request to a completely different,
+    /// unpinned repo/path. Must be rejected.
+    @Test func dotSegmentTraversalPathThrows() throws {
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/../../../evil/repo/releases/download/v1/x.dmg",
+            sha256: "irrelevant"
+        )
+
+        var notarizationCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: URL(fileURLWithPath: "/nonexistent/path/App.dmg"),
+                manifest: m,
+                notarizationCheck: { _ in
+                    notarizationCheckWasCalled = true
+                    return true
+                },
+                identityCheck: { _ in true }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .insecureDMGURL(m.dmgURL))
+        }
+        #expect(!notarizationCheckWasCalled)
+    }
+
+    /// Percent-encoded dot-segment traversal (`%2e%2e`) must also be
+    /// rejected, not just the literal `..` form.
+    @Test func percentEncodedDotSegmentTraversalThrows() throws {
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/%2e%2e/%2e%2e/evil/x.dmg",
+            sha256: "irrelevant"
+        )
+
+        var notarizationCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: URL(fileURLWithPath: "/nonexistent/path/App.dmg"),
+                manifest: m,
+                notarizationCheck: { _ in
+                    notarizationCheckWasCalled = true
+                    return true
+                },
+                identityCheck: { _ in true }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .insecureDMGURL(m.dmgURL))
+        }
+        #expect(!notarizationCheckWasCalled)
+    }
+
+    /// A single-dot (`.`) path component is also a dot-segment and must be
+    /// rejected, not just `..`.
+    @Test func singleDotPathComponentThrows() throws {
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/./v1/x.dmg",
+            sha256: "irrelevant"
+        )
+
+        var notarizationCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: URL(fileURLWithPath: "/nonexistent/path/App.dmg"),
+                manifest: m,
+                notarizationCheck: { _ in
+                    notarizationCheckWasCalled = true
+                    return true
+                },
+                identityCheck: { _ in true }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .insecureDMGURL(m.dmgURL))
+        }
+        #expect(!notarizationCheckWasCalled)
+    }
+
+    /// A URL that is exactly the pinned prefix, with nothing after it, is
+    /// not a valid DMG location and must be rejected.
+    @Test func bareprefixWithNothingAfterItThrows() throws {
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/",
+            sha256: "irrelevant"
+        )
+
+        var notarizationCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: URL(fileURLWithPath: "/nonexistent/path/App.dmg"),
+                manifest: m,
+                notarizationCheck: { _ in
+                    notarizationCheckWasCalled = true
+                    return true
+                },
+                identityCheck: { _ in true }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .insecureDMGURL(m.dmgURL))
+        }
+        #expect(!notarizationCheckWasCalled)
+    }
+
+    /// Encoded-slash traversal: `..%2f..%2fevil` decodes (via `URL.path`)
+    /// into a single fused path component `../../evil` that is never a
+    /// literal `.`/`..` `pathComponents` entry, sidestepping the naive
+    /// component check. Must still be rejected.
+    @Test func encodedSlashTraversalThrows() throws {
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/..%2f..%2fevil/x.dmg",
+            sha256: "irrelevant"
+        )
+
+        var notarizationCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: URL(fileURLWithPath: "/nonexistent/path/App.dmg"),
+                manifest: m,
+                notarizationCheck: { _ in
+                    notarizationCheckWasCalled = true
+                    return true
+                },
+                identityCheck: { _ in true }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .insecureDMGURL(m.dmgURL))
+        }
+        #expect(!notarizationCheckWasCalled)
+    }
+
+    /// Encoded-slash traversal embedded later in the path (in the filename
+    /// position) must also be rejected.
+    @Test func encodedSlashTraversalInFilenamePositionThrows() throws {
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/v1/x%2f..%2f..%2fevil.dmg",
+            sha256: "irrelevant"
+        )
+
+        var notarizationCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: URL(fileURLWithPath: "/nonexistent/path/App.dmg"),
+                manifest: m,
+                notarizationCheck: { _ in
+                    notarizationCheckWasCalled = true
+                    return true
+                },
+                identityCheck: { _ in true }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .insecureDMGURL(m.dmgURL))
+        }
+        #expect(!notarizationCheckWasCalled)
+    }
+
+    /// An encoded backslash (`%5c`) anywhere in the URL must also be
+    /// rejected, alongside the encoded-slash case.
+    @Test func encodedBackslashThrows() throws {
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/v1/x%5cy.dmg",
+            sha256: "irrelevant"
+        )
+
+        var notarizationCheckWasCalled = false
+        do {
+            try UpdateInstaller.verify(
+                dmgURL: URL(fileURLWithPath: "/nonexistent/path/App.dmg"),
+                manifest: m,
+                notarizationCheck: { _ in
+                    notarizationCheckWasCalled = true
+                    return true
+                },
+                identityCheck: { _ in true }
+            )
+            Issue.record("expected verify to throw")
+        } catch let error as UpdateVerificationError {
+            #expect(error == .insecureDMGURL(m.dmgURL))
+        }
+        #expect(!notarizationCheckWasCalled)
+    }
+
+    /// Ordinary percent-encoding that is NOT a traversal/slash/backslash
+    /// sequence (a percent-encoded space in the filename) must NOT be
+    /// over-rejected: the legitimate URL still passes end-to-end.
+    @Test func percentEncodedSpaceInFilenameStillPasses() throws {
+        let content = Data("encoded space filename check".utf8)
+        let fileURL = try writeTempFile(content)
+        let m = manifest(
+            dmgURL: "https://github.com/ebowman/vpn-switch/releases/download/v9.9.9/VPNSwitch%201.dmg",
+            sha256: sha256Hex(content)
+        )
+
+        try UpdateInstaller.verify(
+            dmgURL: fileURL,
+            manifest: m,
+            notarizationCheck: { _ in true },
+            identityCheck: { _ in true }
+        )
+    }
+
     @Test func httpsAndPinnedHostAndPathPassesURLValidation() throws {
         // Confirms the host+path pin isn't accidentally rejecting the
         // legitimate host/path too: only the URL-validation step is under
