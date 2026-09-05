@@ -48,17 +48,30 @@ struct UpdateInstallerRunnerTests {
         let errors: [UpdateSwapError] = [
             .scriptWriteFailed("write failed"),
             .scriptPermissionsFailed("chmod failed"),
-            .launchFailed("launch failed")
+            .launchFailed("launch failed"),
+            .logDirectoryCreationFailed("mkdir failed")
         ]
-        #expect(errors.count == 3)
+        #expect(errors.count == 4)
 
         for error in errors {
             switch error {
             case .scriptWriteFailed(let message),
                  .scriptPermissionsFailed(let message),
-                 .launchFailed(let message):
+                 .launchFailed(let message),
+                 .logDirectoryCreationFailed(let message):
                 #expect(!message.isEmpty)
             }
         }
+    }
+
+    // MARK: - updateLogPath (dns-config-lsj)
+
+    @Test func updateLogPathIsUnderHomeLibraryLogsAndNotTmp() {
+        let path = UpdateInstallerRunner.updateLogPath
+        let home = NSHomeDirectory()
+        #expect(path.hasPrefix(home))
+        #expect(path.hasSuffix("Library/Logs/vpn-switch/update.log"))
+        #expect(!path.hasPrefix("/tmp"))
+        #expect(!path.contains("/tmp/"))
     }
 }

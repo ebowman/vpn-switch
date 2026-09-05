@@ -93,19 +93,27 @@ enum UpdateSwapScript {
     ///     it. `nil` (the default) omits this check entirely, which the
     ///     LIVE integration tests rely on for fixtures built without a
     ///     precomputed digest.
+    ///   - bundleIdentifier: the expected `CFBundleIdentifier` of BOTH the
+    ///     installed (old) bundle and the mounted (new) bundle. No default —
+    ///     callers must be explicit; `UpdateInstallerRunner` passes
+    ///     `Bundle.main.bundleIdentifier ?? "ie.boboco.vpnswitch"`. Read from
+    ///     each bundle's `Contents/Info.plist` with `PlistBuddy` at swap
+    ///     time and compared against this value before either bundle is
+    ///     touched — see step 7 below.
     ///
     /// Every one of the four core string values (`dmgPath`, `parentPID`,
     /// `installDir`, `bundleName`) is interpolated through `shQuote(_:)`
-    /// exactly once; `requirement` and `expectedSHA256` (when present) are
-    /// too. The script:
+    /// exactly once; `requirement`, `bundleIdentifier`, and `expectedSHA256`
+    /// (when present) are too. The script:
     ///   1. Spins on `kill -0 "$PID"` (once per 0.5s) until the parent
     ///      process has actually exited, so the running `.app` bundle is
     ///      never touched while still in use.
     ///   2. When `expectedSHA256` was supplied, re-hashes `$DMG_PATH` with
     ///      `shasum -a 256` and refuses to proceed (app untouched, nothing
     ///      mounted) if it no longer matches what was verified.
-    ///   3. `hdiutil attach -nobrowse -noverify -plist` the DMG, capturing
-    ///      its plist output to a temp file.
+    ///   3. `hdiutil attach -nobrowse -noverify -readonly -plist` the DMG
+    ///      (mounted read-only: this script never writes to the mounted
+    ///      volume), capturing its plist output to a temp file.
     ///   4. Parses the mount point out of that plist with `python3` (never
     ///      by grepping `/Volumes` — fragile and ambiguous with concurrent
     ///      mounts). If `python3` is unavailable, or parsing fails to
@@ -122,32 +130,55 @@ enum UpdateSwapScript {
     ///   6. Refuses to proceed if the installed bundle
     ///      (`"$INSTALL_DIR/$BUNDLE_NAME"`) does not already exist as a
     ///      directory — guards against a wrong `installDir` turning the
-    ///      next step into a no-op `rm -rf` of the wrong place followed by
-    ///      installing into a location nothing will ever launch from.
-    ///   7. `rm -rf` the OLD installed bundle
-    ///      (`"$INSTALL_DIR/$BUNDLE_NAME"`) — the single irreversible step
-    ///      in this entire pipeline.
-    ///   8. `cp -R` the new bundle from the mounted DMG into `installDir` in
-    ///      its place — same path, same signing identity, so TCC/login-item/
-    ///      keychain-ACL grants survive (do not change this to a "fresh
-    ///      install" elsewhere).
+    ///      next steps into installing into a location nothing will ever
+    ///      launch from.
+    ///   7. Bundle identity sanity, BEFORE anything is moved: refuses if
+    ///      `$NEW_BUNDLE` is a symlink; reads `CFBundleIdentifier` from both
+    ///      `$OLD_BUNDLE/Contents/Info.plist` and
+    ///      `$NEW_BUNDLE/Contents/Info.plist` via
+    ///      `/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier'`; if
+    ///      either read fails or either value differs from `$BUNDLE_ID`, the
+    ///      script refuses, detaches, and exits 1 with the installed bundle
+    ///      completely untouched.
+    ///   8. Atomic stage-and-swap (the ONLY way the installed bundle is ever
+    ///      modified): `ditto` the new bundle into a staging directory
+    ///      alongside it, re-verify the codesign requirement against the
+    ///      STAGED copy (proves the copy itself is intact, not just the
+    ///      mounted source), `mv` the old bundle aside, `mv` the staged copy
+    ///      into the old bundle's place, then `rm -rf` the set-aside old
+    ///      bundle. Every one of these uses `mv`/`ditto`/`rm` on paths
+    ///      derived from `INSTALL_DIR`/`BUNDLE_NAME`, both of which are
+    ///      guarded above (non-empty, not `/`, no slash or dot-only names)
+    ///      before this point — those guards protect these derived paths
+    ///      too. A failure at the `ditto` step or the staged codesign
+    ///      re-check leaves the installed bundle completely untouched
+    ///      (nothing renamed yet). A failure moving the old bundle aside
+    ///      leaves it in place (never renamed). A failure moving the staged
+    ///      copy into place attempts to roll the old bundle back into place
+    ///      and logs whether that rollback itself succeeded. See
+    ///      `generate`'s implementation for the exact step-by-step shell.
     ///   9. `hdiutil detach` the mounted volume.
     ///   10. `open` the freshly-installed bundle — unless `relaunch` is
     ///      `false`, in which case this step is skipped and a log line is
     ///      emitted in its place.
+    ///   11. On the success path only, removes the temp plist file and the
+    ///      downloaded DMG (`rm -f`, non-fatal if either is already gone).
+    ///      Every failure path removes the temp plist but deliberately
+    ///      LEAVES the DMG in place for diagnosis (logged explicitly).
     ///
     /// Every step from `hdiutil attach` onward is written with `set -e`
     /// semantics made explicit (`|| exit 1` after the load-bearing steps)
     /// so a failure partway through stops rather than silently continuing
     /// into the next (potentially destructive) step. All output is expected
     /// to be redirected to a log file by the CALLER (via `nohup ... >>
-    /// /tmp/vpn-switch-update.log 2>&1 &` or similar), not by this script
-    /// itself — this script just writes to stdout/stderr as normal.
+    /// ~/Library/Logs/vpn-switch/update.log 2>&1 &` or similar), not by this
+    /// script itself — this script just writes to stdout/stderr as normal.
     static func generate(
         dmgPath: String,
         parentPID: Int32,
         installDir: String,
         bundleName: String,
+        bundleIdentifier: String,
         relaunch: Bool = true,
         requirement: String = UpdateInstaller.designatedRequirement,
         expectedSHA256: String? = nil
@@ -157,6 +188,7 @@ enum UpdateSwapScript {
         let qInstallDir = shQuote(installDir)
         let qBundleName = shQuote(bundleName)
         let qRequirement = shQuote(requirement)
+        let qBundleID = shQuote(bundleIdentifier)
 
         let relaunchStep: String
         if relaunch {
@@ -201,6 +233,7 @@ enum UpdateSwapScript {
         INSTALL_DIR=\(qInstallDir)
         BUNDLE_NAME=\(qBundleName)
         REQUIREMENT=\(qRequirement)
+        BUNDLE_ID=\(qBundleID)
         \(expectedSHA256Assignment)
 
         # Refuse to run at all with a target that could make the rm -rf below
@@ -233,14 +266,29 @@ enum UpdateSwapScript {
         echo "[vpn-switch-update] parent exited, proceeding"
         \(digestCheckStep)
         PLIST_PATH="$(mktemp -t vpn-switch-update-plist)"
+
+        # Removes the temp plist. Called on every exit path (success and
+        # failure alike) -- unlike the downloaded DMG (deliberately kept on
+        # failure for diagnosis), the plist is pure hdiutil-attach output
+        # with no diagnostic value once the script has decided what to do
+        # with it.
+        # Failure-path cleanup: drop the hdiutil plist but keep the DMG so the
+        # failure can be diagnosed; say so in the log.
+        cleanup_plist() {
+            /bin/rm -f "$PLIST_PATH"
+            echo "[vpn-switch-update] DMG left at $DMG_PATH for diagnosis"
+        }
+
         echo "[vpn-switch-update] attaching $DMG_PATH"
-        if ! hdiutil attach -nobrowse -noverify -plist "$DMG_PATH" > "$PLIST_PATH"; then
+        if ! hdiutil attach -nobrowse -noverify -readonly -plist "$DMG_PATH" > "$PLIST_PATH"; then
             echo "[vpn-switch-update] hdiutil attach failed"
+            cleanup_plist
             exit 1
         fi
 
         if ! command -v python3 >/dev/null 2>&1; then
             echo "[vpn-switch-update] python3 not found; cannot safely parse hdiutil plist, aborting"
+            cleanup_plist
             exit 1
         fi
 
@@ -260,6 +308,7 @@ enum UpdateSwapScript {
 
         if [ -z "$MOUNT_POINT" ]; then
             echo "[vpn-switch-update] could not determine mount point from hdiutil plist, aborting"
+            cleanup_plist
             exit 1
         fi
         echo "[vpn-switch-update] mounted at $MOUNT_POINT"
@@ -268,6 +317,7 @@ enum UpdateSwapScript {
         if [ ! -d "$NEW_BUNDLE" ]; then
             echo "[vpn-switch-update] $NEW_BUNDLE not found on mounted volume, aborting"
             hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
             exit 1
         fi
 
@@ -285,6 +335,7 @@ enum UpdateSwapScript {
         if ! /usr/bin/codesign --verify --deep --strict -R="$REQUIREMENT" "$NEW_BUNDLE"; then
             echo "[vpn-switch-update] refusing to install: $NEW_BUNDLE does not satisfy the designated requirement (Team ID pin)"
             hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
             exit 1
         fi
 
@@ -292,19 +343,110 @@ enum UpdateSwapScript {
         if [ ! -d "$OLD_BUNDLE" ]; then
             echo "[vpn-switch-update] installed bundle not found at $OLD_BUNDLE, aborting"
             hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
             exit 1
         fi
 
-        echo "[vpn-switch-update] removing $OLD_BUNDLE"
-        rm -rf "$OLD_BUNDLE"
+        # Refuse a symlinked NEW_BUNDLE outright: cp/ditto following a
+        # crafted symlink out of the mounted DMG into the install tree is
+        # exactly the kind of thing the identity checks below cannot catch
+        # after the fact.
+        if [ -L "$NEW_BUNDLE" ]; then
+            echo "[vpn-switch-update] refusing to install: $NEW_BUNDLE is a symlink"
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
+            exit 1
+        fi
 
-        echo "[vpn-switch-update] copying $NEW_BUNDLE to $INSTALL_DIR"
-        cp -R "$NEW_BUNDLE" "$INSTALL_DIR/"
+        # Bundle identity sanity, BEFORE anything is moved: both the
+        # currently-installed bundle and the new one about to replace it
+        # must report the expected CFBundleIdentifier. This is a sanity
+        # check independent of the Team ID / codesign checks above -- it
+        # guards against a wrong INSTALL_DIR/BUNDLE_NAME pairing pointing at
+        # some other (still validly-signed, still Team-ID-matching)
+        # application entirely. Every derived path below (STAGED,
+        # OLD_ASIDE) is built from the same INSTALL_DIR/BUNDLE_NAME already
+        # validated by the empty/root/unsafe-name guards near the top of
+        # this script, so those guards protect these derived paths too.
+        OLD_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$OLD_BUNDLE/Contents/Info.plist" 2>/dev/null)" || OLD_BUNDLE_ID=""
+        NEW_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$NEW_BUNDLE/Contents/Info.plist" 2>/dev/null)" || NEW_BUNDLE_ID=""
+        if [ -z "$OLD_BUNDLE_ID" ] || [ "$OLD_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+            echo "[vpn-switch-update] refusing to install: $OLD_BUNDLE has unexpected or unreadable CFBundleIdentifier (got '$OLD_BUNDLE_ID', expected '$BUNDLE_ID')"
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
+            exit 1
+        fi
+        if [ -z "$NEW_BUNDLE_ID" ] || [ "$NEW_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+            echo "[vpn-switch-update] refusing to install: $NEW_BUNDLE has unexpected or unreadable CFBundleIdentifier (got '$NEW_BUNDLE_ID', expected '$BUNDLE_ID')"
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
+            exit 1
+        fi
+
+        # Atomic stage-and-swap. STAGED and OLD_ASIDE are both derived from
+        # INSTALL_DIR/BUNDLE_NAME (validated above) plus this script's own
+        # pid ($$), so they cannot collide with a concurrent run of this
+        # same script.
+        STAGED="$INSTALL_DIR/.$BUNDLE_NAME.update-staging.$$"
+        OLD_ASIDE="$INSTALL_DIR/.$BUNDLE_NAME.previous.$$"
+
+        /bin/rm -rf "$STAGED"
+
+        echo "[vpn-switch-update] staging $NEW_BUNDLE to $STAGED"
+        if ! /usr/bin/ditto "$NEW_BUNDLE" "$STAGED"; then
+            echo "[vpn-switch-update] staging copy failed, installed bundle untouched"
+            /bin/rm -rf "$STAGED"
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
+            exit 1
+        fi
+
+        # Re-verify the STAGED copy against the same requirement -- proves
+        # the ditto copy itself is intact and still satisfies the Team ID
+        # pin, not merely that the mounted source did.
+        echo "[vpn-switch-update] verifying staged copy $STAGED satisfies designated requirement"
+        if ! /usr/bin/codesign --verify --deep --strict -R="$REQUIREMENT" "$STAGED"; then
+            echo "[vpn-switch-update] refusing to install: staged copy $STAGED does not satisfy the designated requirement, installed bundle untouched"
+            /bin/rm -rf "$STAGED"
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
+            exit 1
+        fi
+
+        echo "[vpn-switch-update] moving $OLD_BUNDLE aside to $OLD_ASIDE"
+        if ! /bin/mv "$OLD_BUNDLE" "$OLD_ASIDE"; then
+            echo "[vpn-switch-update] could not move old bundle aside, installed bundle untouched"
+            /bin/rm -rf "$STAGED"
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
+            exit 1
+        fi
+
+        echo "[vpn-switch-update] moving staged copy into place at $OLD_BUNDLE"
+        if ! /bin/mv "$STAGED" "$OLD_BUNDLE"; then
+            echo "[vpn-switch-update] moving staged copy into place failed, attempting rollback"
+            if /bin/mv "$OLD_ASIDE" "$OLD_BUNDLE"; then
+                echo "[vpn-switch-update] rollback succeeded, installed bundle restored"
+            else
+                echo "[vpn-switch-update] rollback FAILED -- no app may be installed at $OLD_BUNDLE, previous bundle may still be at $OLD_ASIDE"
+            fi
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            cleanup_plist
+            exit 1
+        fi
+
+        echo "[vpn-switch-update] removing set-aside old bundle $OLD_ASIDE"
+        if ! /bin/rm -rf "$OLD_ASIDE"; then
+            echo "[vpn-switch-update] warning: failed to remove set-aside old bundle at $OLD_ASIDE (new app is already installed and unaffected)"
+        fi
 
         echo "[vpn-switch-update] detaching $MOUNT_POINT"
         hdiutil detach "$MOUNT_POINT" -quiet || true
 
         \(relaunchStep)
+
+        /bin/rm -f "$PLIST_PATH"
+        /bin/rm -f "$DMG_PATH"
 
         echo "[vpn-switch-update] update complete"
         """

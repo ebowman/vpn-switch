@@ -154,7 +154,8 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/update.dmg",
             parentPID: 4242,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
         #expect(script.hasPrefix("#!/bin/sh\n"))
         #expect(script.contains("set -e"))
@@ -165,23 +166,27 @@ struct UpdateSwapScriptTests {
         let pid: Int32 = 99887
         let installDir = "/Applications"
         let bundleName = "VPN Switch.app"
+        let bundleIdentifier = "ie.boboco.vpnswitch"
 
         let script = UpdateSwapScript.generate(
             dmgPath: dmgPath,
             parentPID: pid,
             installDir: installDir,
-            bundleName: bundleName
+            bundleName: bundleName,
+            bundleIdentifier: bundleIdentifier
         )
 
         let expectedDMGAssignment = "DMG_PATH=\(UpdateSwapScript.shQuote(dmgPath))"
         let expectedPIDAssignment = "PID=\(UpdateSwapScript.shQuote(String(pid)))"
         let expectedInstallDirAssignment = "INSTALL_DIR=\(UpdateSwapScript.shQuote(installDir))"
         let expectedBundleNameAssignment = "BUNDLE_NAME=\(UpdateSwapScript.shQuote(bundleName))"
+        let expectedBundleIDAssignment = "BUNDLE_ID=\(UpdateSwapScript.shQuote(bundleIdentifier))"
 
         #expect(script.contains(expectedDMGAssignment))
         #expect(script.contains(expectedPIDAssignment))
         #expect(script.contains(expectedInstallDirAssignment))
         #expect(script.contains(expectedBundleNameAssignment))
+        #expect(script.contains(expectedBundleIDAssignment))
 
         // Each assignment line appears EXACTLY once — proves the value is
         // not accidentally duplicated (e.g. once quoted, once raw), which
@@ -191,6 +196,7 @@ struct UpdateSwapScriptTests {
         #expect(script.components(separatedBy: expectedPIDAssignment).count == 2)
         #expect(script.components(separatedBy: expectedInstallDirAssignment).count == 2)
         #expect(script.components(separatedBy: expectedBundleNameAssignment).count == 2)
+        #expect(script.components(separatedBy: expectedBundleIDAssignment).count == 2)
     }
 
     @Test func generatedScriptNeverContainsRawUnquotedDangerousPath() {
@@ -203,7 +209,8 @@ struct UpdateSwapScriptTests {
             dmgPath: dangerousPath,
             parentPID: 1,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
 
         // The only occurrence of the raw substring must be inside the
@@ -218,33 +225,50 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
 
         guard let killRange = script.range(of: "kill -0"),
-              let rmRange = script.range(of: "rm -rf \"$OLD_BUNDLE\"") else {
-            Issue.record("expected both 'kill -0' wait loop and 'rm -rf \"$OLD_BUNDLE\"' to be present")
+              let mvRange = script.range(of: "/bin/mv \"$OLD_BUNDLE\" \"$OLD_ASIDE\"") else {
+            Issue.record("expected both 'kill -0' wait loop and the old-bundle mv-aside step to be present")
             return
         }
-        // Non-vacuous: this fails if the destructive rm -rf were ever moved
-        // (or newly introduced) ahead of the parent-exit wait loop.
-        #expect(killRange.lowerBound < rmRange.lowerBound)
+        // Non-vacuous: this fails if the destructive mv-aside step were ever
+        // moved (or newly introduced) ahead of the parent-exit wait loop.
+        #expect(killRange.lowerBound < mvRange.lowerBound)
     }
 
-    @Test func generatedScriptRemovesOldBundleBeforeCopyingNewOne() {
+    /// The atomic stage-and-swap must happen in exactly this order: verify
+    /// the MOUNTED bundle, ditto it into a staging dir, re-verify the
+    /// STAGED copy, move the old bundle aside, move the staged copy into
+    /// place, and only then remove the set-aside old bundle. Any other
+    /// ordering reopens the "no app installed after a failure" gap this
+    /// bead closes.
+    @Test func generatedScriptPerformsAtomicStageAndSwapInOrder() {
         let script = UpdateSwapScript.generate(
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
 
-        guard let rmRange = script.range(of: "rm -rf \"$OLD_BUNDLE\""),
-              let cpRange = script.range(of: "cp -R \"$NEW_BUNDLE\"") else {
-            Issue.record("expected both rm -rf and cp -R steps to be present")
+        guard let codesignOnNewRange = script.range(of: "/usr/bin/codesign --verify --deep --strict -R=\"$REQUIREMENT\" \"$NEW_BUNDLE\""),
+              let dittoRange = script.range(of: "/usr/bin/ditto \"$NEW_BUNDLE\" \"$STAGED\""),
+              let codesignOnStagedRange = script.range(of: "/usr/bin/codesign --verify --deep --strict -R=\"$REQUIREMENT\" \"$STAGED\""),
+              let mvOldAsideRange = script.range(of: "/bin/mv \"$OLD_BUNDLE\" \"$OLD_ASIDE\""),
+              let mvStagedIntoPlaceRange = script.range(of: "/bin/mv \"$STAGED\" \"$OLD_BUNDLE\""),
+              let rmOldAsideRange = script.range(of: "/bin/rm -rf \"$OLD_ASIDE\"") else {
+            Issue.record("expected all six atomic stage-and-swap steps to be present")
             return
         }
-        #expect(rmRange.lowerBound < cpRange.lowerBound)
+
+        #expect(codesignOnNewRange.lowerBound < dittoRange.lowerBound)
+        #expect(dittoRange.lowerBound < codesignOnStagedRange.lowerBound)
+        #expect(codesignOnStagedRange.lowerBound < mvOldAsideRange.lowerBound)
+        #expect(mvOldAsideRange.lowerBound < mvStagedIntoPlaceRange.lowerBound)
+        #expect(mvStagedIntoPlaceRange.lowerBound < rmOldAsideRange.lowerBound)
     }
 
     @Test func generatedScriptUsesPython3ToParsePlistNotGrepVolumes() {
@@ -252,7 +276,8 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
         #expect(script.contains("python3"))
         #expect(script.contains("plistlib"))
@@ -264,7 +289,8 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
         #expect(script.contains("command -v python3"))
         // Must exit nonzero rather than silently continuing when python3
@@ -291,7 +317,8 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/x.dmg",
             parentPID: 999_999,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
 
         // The guards must exist...
@@ -301,11 +328,11 @@ struct UpdateSwapScriptTests {
 
         // ...and must come BEFORE the destructive line, or they are useless.
         let guardIndex = script.range(of: #"[ -z "$INSTALL_DIR" ]"#)
-        let removeIndex = script.range(of: #"rm -rf "$OLD_BUNDLE""#)
+        let moveAsideIndex = script.range(of: #"/bin/mv "$OLD_BUNDLE" "$OLD_ASIDE""#)
         #expect(guardIndex != nil)
-        #expect(removeIndex != nil)
-        if let g = guardIndex, let r = removeIndex {
-            #expect(g.lowerBound < r.lowerBound)
+        #expect(moveAsideIndex != nil)
+        if let g = guardIndex, let m = moveAsideIndex {
+            #expect(g.lowerBound < m.lowerBound)
         }
     }
 
@@ -317,7 +344,8 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/x.dmg",
             parentPID: 999_999,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
 
         #expect(script.contains("refusing to run: empty install dir or bundle name"))
@@ -332,15 +360,16 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/x.dmg",
             parentPID: 999_999,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
 
         guard let guardRange = script.range(of: "installed bundle not found at $OLD_BUNDLE, aborting"),
-              let rmRange = script.range(of: #"rm -rf "$OLD_BUNDLE""#) else {
-            Issue.record("expected both the missing-installed-bundle guard and rm -rf to be present")
+              let moveAsideRange = script.range(of: #"/bin/mv "$OLD_BUNDLE" "$OLD_ASIDE""#) else {
+            Issue.record("expected both the missing-installed-bundle guard and the old-bundle mv-aside step to be present")
             return
         }
-        #expect(guardRange.lowerBound < rmRange.lowerBound)
+        #expect(guardRange.lowerBound < moveAsideRange.lowerBound)
     }
 
     @Test func generatedScriptOpensRelaunchedAppAtEndWhenRelaunchIsTrue() {
@@ -349,14 +378,15 @@ struct UpdateSwapScriptTests {
             parentPID: 555,
             installDir: "/Applications",
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             relaunch: true
         )
-        guard let cpRange = script.range(of: "cp -R \"$NEW_BUNDLE\""),
+        guard let mvStagedIntoPlaceRange = script.range(of: "/bin/mv \"$STAGED\" \"$OLD_BUNDLE\""),
               let openRange = script.range(of: "open \"$OLD_BUNDLE\"") else {
-            Issue.record("expected both cp -R and open steps to be present")
+            Issue.record("expected both the staged-copy install step and the open step to be present")
             return
         }
-        #expect(cpRange.lowerBound < openRange.lowerBound)
+        #expect(mvStagedIntoPlaceRange.lowerBound < openRange.lowerBound)
     }
 
     @Test func generatedScriptOmitsOpenWhenRelaunchIsFalse() {
@@ -365,6 +395,7 @@ struct UpdateSwapScriptTests {
             parentPID: 555,
             installDir: "/Applications",
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             relaunch: false
         )
         #expect(!script.contains("open \"$OLD_BUNDLE\""))
@@ -376,20 +407,41 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
         #expect(script.contains("open \"$OLD_BUNDLE\""))
     }
 
-    @Test func generatedScriptContainsExactlyOneRmRfOfOldBundle() {
+    /// The old install-in-place approach (`rm -rf "$OLD_BUNDLE"` immediately
+    /// followed by `cp -R`) is exactly the non-atomic sequence this bead
+    /// replaces: a failure between the two left no app installed. The
+    /// script must never remove `$OLD_BUNDLE` directly -- only ever move it
+    /// aside (to `$OLD_ASIDE`) first. Every `rm -rf` in the script must
+    /// target only the staging or set-aside paths, never the live bundle
+    /// directly.
+    @Test func generatedScriptNeverRemovesOldBundleDirectlyOnlyStagedOrAsidePaths() {
         let script = UpdateSwapScript.generate(
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
-        let count = script.components(separatedBy: "rm -rf \"$OLD_BUNDLE\"").count - 1
-        #expect(count == 1)
+
+        #expect(!script.contains("rm -rf \"$OLD_BUNDLE\""))
+
+        // Every `rm -rf` target found in the script text must be either
+        // "$STAGED" or "$OLD_ASIDE" -- never "$OLD_BUNDLE" or anything else.
+        let pattern = #"rm -rf "([^"]+)""#
+        let regex = try! NSRegularExpression(pattern: pattern)
+        let nsScript = script as NSString
+        let matches = regex.matches(in: script, range: NSRange(location: 0, length: nsScript.length))
+        #expect(!matches.isEmpty, "expected at least one rm -rf in the generated script")
+        for match in matches {
+            let target = nsScript.substring(with: match.range(at: 1))
+            #expect(target == "$STAGED" || target == "$OLD_ASIDE", "unexpected rm -rf target: \(target)")
+        }
     }
 
     // MARK: - Team ID re-verification of the mounted bundle (dns-config-407)
@@ -399,21 +451,22 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
 
         guard let attachRange = script.range(of: "hdiutil attach"),
               let codesignRange = script.range(of: "/usr/bin/codesign --verify --deep --strict -R=\"$REQUIREMENT\""),
-              let rmRange = script.range(of: "rm -rf \"$OLD_BUNDLE\"") else {
-            Issue.record("expected hdiutil attach, the codesign re-verify step, and rm -rf to all be present")
+              let mvOldAsideRange = script.range(of: "/bin/mv \"$OLD_BUNDLE\" \"$OLD_ASIDE\"") else {
+            Issue.record("expected hdiutil attach, the codesign re-verify step, and the old-bundle mv-aside step to all be present")
             return
         }
         // Non-vacuous: fails if the re-verify step were ever moved ahead of
         // the attach (nothing to verify yet) or behind the destructive
-        // rm -rf (too late to prevent it) -- see UpdateSwapScript.generate's
-        // doc comment step 5.
+        // mv-aside step (too late to prevent it) -- see
+        // UpdateSwapScript.generate's doc comment step 5.
         #expect(attachRange.lowerBound < codesignRange.lowerBound)
-        #expect(codesignRange.lowerBound < rmRange.lowerBound)
+        #expect(codesignRange.lowerBound < mvOldAsideRange.lowerBound)
     }
 
     @Test func generatedScriptDefaultRequirementEqualsUpdateInstallerConstant() {
@@ -421,7 +474,8 @@ struct UpdateSwapScriptTests {
             dmgPath: "/tmp/update.dmg",
             parentPID: 555,
             installDir: "/Applications",
-            bundleName: "VPN Switch.app"
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
         )
         let expectedAssignment = "REQUIREMENT=\(UpdateSwapScript.shQuote(UpdateInstaller.designatedRequirement))"
         #expect(script.contains(expectedAssignment))
@@ -436,6 +490,7 @@ struct UpdateSwapScriptTests {
             parentPID: 555,
             installDir: "/Applications",
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             requirement: customRequirement
         )
         let expectedAssignment = "REQUIREMENT=\(UpdateSwapScript.shQuote(customRequirement))"
@@ -474,6 +529,7 @@ struct UpdateSwapScriptTests {
             parentPID: 555,
             installDir: "/Applications",
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             requirement: trickyRequirement
         )
         #expect(script.contains("REQUIREMENT=\(quoted)"))
@@ -490,6 +546,7 @@ struct UpdateSwapScriptTests {
             parentPID: 555,
             installDir: "/Applications",
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             requirement: trickyRequirement
         )
         let quoted = UpdateSwapScript.shQuote(trickyRequirement)
@@ -522,6 +579,7 @@ struct UpdateSwapScriptTests {
             parentPID: 555,
             installDir: "/Applications",
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             expectedSHA256: "abc123"
         )
         #expect(script.contains("EXPECTED_SHA256=\(UpdateSwapScript.shQuote("abc123"))"))
@@ -542,9 +600,100 @@ struct UpdateSwapScriptTests {
             parentPID: 555,
             installDir: "/Applications",
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             expectedSHA256: nil
         )
         #expect(!script.contains("shasum"))
         #expect(!script.contains("EXPECTED_SHA256"))
+    }
+
+    // MARK: - Atomic stage-and-swap hardening (dns-config-lsj)
+
+    @Test func generatedScriptMountsReadOnly() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
+        )
+        guard let attachLineRange = script.range(of: "hdiutil attach -nobrowse -noverify -readonly -plist") else {
+            Issue.record("expected hdiutil attach to include -readonly")
+            return
+        }
+        _ = attachLineRange
+    }
+
+    @Test func generatedScriptEmbedsBundleIDShQuotedExactlyOnceAndChecksPrecedeAnyMove() {
+        let bundleIdentifier = "ie.boboco.vpnswitch"
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: bundleIdentifier
+        )
+
+        let expectedAssignment = "BUNDLE_ID=\(UpdateSwapScript.shQuote(bundleIdentifier))"
+        #expect(script.contains(expectedAssignment))
+        #expect(script.components(separatedBy: expectedAssignment).count == 2)
+
+        guard let oldPlistBuddyRange = script.range(of: "/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \"$OLD_BUNDLE/Contents/Info.plist\""),
+              let newPlistBuddyRange = script.range(of: "/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \"$NEW_BUNDLE/Contents/Info.plist\""),
+              let mvOldAsideRange = script.range(of: "/bin/mv \"$OLD_BUNDLE\" \"$OLD_ASIDE\"") else {
+            Issue.record("expected both PlistBuddy identity checks and the old-bundle mv-aside step to be present")
+            return
+        }
+        #expect(oldPlistBuddyRange.lowerBound < mvOldAsideRange.lowerBound)
+        #expect(newPlistBuddyRange.lowerBound < mvOldAsideRange.lowerBound)
+    }
+
+    @Test func generatedScriptRefusesSymlinkedNewBundle() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
+        )
+        guard let symlinkCheckRange = script.range(of: #"[ -L "$NEW_BUNDLE" ]"#),
+              let mvOldAsideRange = script.range(of: "/bin/mv \"$OLD_BUNDLE\" \"$OLD_ASIDE\"") else {
+            Issue.record("expected both the symlink check and the old-bundle mv-aside step to be present")
+            return
+        }
+        #expect(symlinkCheckRange.lowerBound < mvOldAsideRange.lowerBound)
+    }
+
+    @Test func generatedScriptRemovesPlistAndDMGOnSuccessPath() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
+        )
+        guard let updateCompleteRange = script.range(of: "update complete") else {
+            Issue.record("expected the success log line to be present")
+            return
+        }
+        let beforeSuccess = script[..<updateCompleteRange.lowerBound]
+        #expect(beforeSuccess.contains("/bin/rm -f \"$PLIST_PATH\""))
+        #expect(beforeSuccess.contains("/bin/rm -f \"$DMG_PATH\""))
+    }
+
+    @Test func generatedScriptRefusalGuardsPrecedeEverythingElse() {
+        let script = UpdateSwapScript.generate(
+            dmgPath: "/tmp/update.dmg",
+            parentPID: 555,
+            installDir: "/Applications",
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch"
+        )
+        guard let lastGuardRange = script.range(of: #"[ "$INSTALL_DIR" = "/" ]"#),
+              let waitRange = script.range(of: "kill -0") else {
+            Issue.record("expected both the root-install-dir guard and the parent-exit wait loop to be present")
+            return
+        }
+        #expect(lastGuardRange.lowerBound < waitRange.lowerBound)
     }
 }

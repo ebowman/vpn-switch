@@ -298,7 +298,7 @@ anything: the file's SHA-256 digest must match the one published in
 `appcast.json`, **and** the file must pass Apple's notarization check
 (`spctl`). Only if both pass does a small detached helper script swap the
 new build into place at the app's current location (normally
-`/Applications/VPN Switch.app`) and relaunch the app. The helper's own log is at `/tmp/vpn-switch-update.log` if you ever
+`/Applications/VPN Switch.app`) and relaunch the app. The helper's own log is at `~/Library/Logs/vpn-switch/update.log` if you ever
 need to see what an install actually did. If verification fails for either
 reason, the downloaded file is discarded and the installed app is left
 completely untouched — nothing partial or broken is ever put in place.
@@ -318,7 +318,7 @@ a different Team ID is rejected: for the downloaded DMG, the app reports
 the identity failure in its verification error and never launches the
 helper; for the mounted app, the helper writes `refusing to install:
 <bundle> does not satisfy the designated requirement (Team ID pin)` to
-`/tmp/vpn-switch-update.log`, detaches the image, and exits. In both cases
+`~/Library/Logs/vpn-switch/update.log`, detaches the image, and exits. In both cases
 the installed app is left untouched.
 
 **Ad-hoc/dev builds cannot self-update.** This verification is by design:

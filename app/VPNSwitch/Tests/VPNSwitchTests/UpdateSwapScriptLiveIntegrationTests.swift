@@ -91,6 +91,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
             parentPID: try pidOfAlreadyExitedProcess(),
             installDir: installDir.path,
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "com.example.vpnswitch-swap-test",
             relaunch: false
         )
 
@@ -113,7 +114,15 @@ struct UpdateSwapScriptLiveIntegrationTests {
     /// attempted. `contentsDir` is the bundle's `Contents` directory
     /// (already created by the caller); this only adds the two files
     /// needed to make it signable.
-    private func writeMinimalSignableBundleContents(contentsDir: URL) throws {
+    ///
+    /// - Parameter bundleIdentifier: the `CFBundleIdentifier` written into
+    ///   the fixture's `Info.plist`. Defaults to
+    ///   `"com.example.vpnswitch-swap-test"` for callers that don't care
+    ///   about the specific value.
+    private func writeMinimalSignableBundleContents(
+        contentsDir: URL,
+        bundleIdentifier: String = "com.example.vpnswitch-swap-test"
+    ) throws {
         let macOSDir = contentsDir.appendingPathComponent("MacOS")
         try FileManager.default.createDirectory(at: macOSDir, withIntermediateDirectories: true)
 
@@ -121,7 +130,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0"><dict>
-        <key>CFBundleIdentifier</key><string>com.example.vpnswitch-swap-test</string>
+        <key>CFBundleIdentifier</key><string>\(bundleIdentifier)</string>
         <key>CFBundleExecutable</key><string>stub</string>
         </dict></plist>
         """
@@ -228,6 +237,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
             parentPID: try pidOfAlreadyExitedProcess(),
             installDir: installDir.path,
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "com.example.vpnswitch-swap-test",
             relaunch: false,
             requirement: adHocRequirement
         )
@@ -334,6 +344,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
             parentPID: try pidOfAlreadyExitedProcess(),
             installDir: installDir.path,
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             relaunch: false
         )
 
@@ -421,6 +432,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
             parentPID: try pidOfAlreadyExitedProcess(),
             installDir: installDir.path,
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             relaunch: false
         )
 
@@ -437,6 +449,137 @@ struct UpdateSwapScriptLiveIntegrationTests {
 
         // No leaked mount.
         #expect(!(try volumeIsMounted(named: volName)))
+
+        // No leftover staging/previous directories in the install dir --
+        // the atomic stage-and-swap must have cleaned up after itself.
+        let installDirContents = try FileManager.default.contentsOfDirectory(atPath: installDir.path)
+        let leftoverStagingOrPrevious = installDirContents.filter {
+            $0.hasPrefix(".VPN Switch.app.update-staging.") || $0.hasPrefix(".VPN Switch.app.previous.")
+        }
+        #expect(leftoverStagingOrPrevious.isEmpty, "unexpected leftover staging/previous entries: \(leftoverStagingOrPrevious)")
+
+        // The DMG must have been removed on the success path. The temp
+        // plist path itself is only known inside the script (mktemp-
+        // generated), but its removal is exercised directly by the
+        // unit-level UpdateSwapScriptTests; here we only check the
+        // artifact this test itself created and can observe: the DMG.
+        #expect(!FileManager.default.fileExists(atPath: dmgPath))
+
+        // The swapped-in bundle's Info.plist must read back the expected
+        // identifier -- proves the real installed bundle (not merely "some
+        // directory") ended up in place.
+        let installedIdentifier = try plistBuddyReadCFBundleIdentifier(bundlePath: oldBundlePath)
+        #expect(installedIdentifier == "ie.boboco.vpnswitch")
+    }
+
+    /// NEGATIVE end-to-end test: the installed (old) bundle's
+    /// CFBundleIdentifier differs from the `bundleIdentifier:` the script
+    /// was generated with. Both fixtures are ad-hoc signed the same way
+    /// (via `adHocSignAndGetDesignatedRequirement`'s signing step) so the
+    /// Team ID / codesign gate is satisfied by both -- the requirement
+    /// passed in (`"true"`, unconditionally satisfied by any validly-formed
+    /// signature) isolates the bundle-identity check specifically,
+    /// independent of the codesign requirement checks covered elsewhere in
+    /// this suite. The script must refuse before anything is moved: the
+    /// installed bundle stays intact, no staging directory is left behind,
+    /// the mount is detached, and (per the failure-path contract) the DMG
+    /// is left in place for diagnosis while the temp plist is removed.
+    @Test(.tags(.live))
+    func scriptRefusesWhenInstalledBundleIdentifierDoesNotMatchBundleID() throws {
+        let scratchRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("swap-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: scratchRoot) }
+
+        // "Old" installed bundle: signable fixture with CFBundleIdentifier
+        // "com.example.vpnswitch-swap-test-OLD".
+        let installDir = scratchRoot.appendingPathComponent("install")
+        let oldBundleContentsDir = installDir.appendingPathComponent("VPN Switch.app/Contents")
+        try FileManager.default.createDirectory(at: oldBundleContentsDir, withIntermediateDirectories: true)
+        try writeMinimalSignableBundleContents(
+            contentsDir: oldBundleContentsDir,
+            bundleIdentifier: "com.example.vpnswitch-swap-test-OLD"
+        )
+        let oldBundlePath = installDir.appendingPathComponent("VPN Switch.app").path
+        let signOld = Process()
+        signOld.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        signOld.arguments = ["--sign", "-", "--force", oldBundlePath]
+        signOld.standardOutput = Pipe()
+        signOld.standardError = Pipe()
+        try signOld.run()
+        signOld.waitUntilExit()
+        #expect(signOld.terminationStatus == 0)
+
+        // "New" bundle for the DMG: signable fixture with a DIFFERENT
+        // CFBundleIdentifier than BUNDLE_ID -- the script is generated with
+        // "ie.boboco.vpnswitch" below, so neither fixture matches it,
+        // exercising the mismatch check for both bundles being compared.
+        let volName = uniqueVolumeName("VPN Switch Test IDMismatch")
+        let dmgSourceDir = scratchRoot.appendingPathComponent("dmgsrc")
+        let newBundleContentsDir = dmgSourceDir.appendingPathComponent("VPN Switch.app/Contents")
+        try FileManager.default.createDirectory(at: newBundleContentsDir, withIntermediateDirectories: true)
+        try writeMinimalSignableBundleContents(
+            contentsDir: newBundleContentsDir,
+            bundleIdentifier: "com.example.vpnswitch-swap-test-NEW"
+        )
+        let newBundlePath = dmgSourceDir.appendingPathComponent("VPN Switch.app").path
+        let signNew = Process()
+        signNew.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        signNew.arguments = ["--sign", "-", "--force", newBundlePath]
+        signNew.standardOutput = Pipe()
+        signNew.standardError = Pipe()
+        try signNew.run()
+        signNew.waitUntilExit()
+        #expect(signNew.terminationStatus == 0)
+
+        let dmgPath = scratchRoot.appendingPathComponent("update.dmg").path
+        let createDMG = Process()
+        createDMG.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        createDMG.arguments = ["create", "-srcfolder", dmgSourceDir.path, "-volname", volName, "-format", "UDZO", "-quiet", dmgPath]
+        createDMG.standardOutput = Pipe()
+        createDMG.standardError = Pipe()
+        try createDMG.run()
+        createDMG.waitUntilExit()
+        #expect(createDMG.terminationStatus == 0)
+
+        // "true" is unconditionally satisfied by any validly-formed
+        // signature (ad-hoc included), so this isolates the bundle-identity
+        // check from the Team ID / cdhash-specific codesign checks covered
+        // by other tests in this suite.
+        let script = UpdateSwapScript.generate(
+            dmgPath: dmgPath,
+            parentPID: try pidOfAlreadyExitedProcess(),
+            installDir: installDir.path,
+            bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
+            relaunch: false,
+            requirement: "true"
+        )
+
+        let scriptURL = scratchRoot.appendingPathComponent("swap.sh")
+        try writeAndMakeExecutable(script, at: scriptURL)
+
+        let (status, output) = try runScript(at: scriptURL)
+        print("ID-MISMATCH SCRIPT OUTPUT:\n\(output)")
+        print("ID-MISMATCH EXIT STATUS: \(status)")
+
+        #expect(status != 0)
+        #expect(output.contains("unexpected or unreadable CFBundleIdentifier"))
+
+        // Installed bundle intact and still reports its original identifier.
+        #expect(FileManager.default.fileExists(atPath: oldBundlePath))
+        let stillInstalledIdentifier = try plistBuddyReadCFBundleIdentifier(bundlePath: oldBundlePath)
+        #expect(stillInstalledIdentifier == "com.example.vpnswitch-swap-test-OLD")
+
+        // No leftover staging directory.
+        let installDirContents = try FileManager.default.contentsOfDirectory(atPath: installDir.path)
+        let leftoverStaging = installDirContents.filter { $0.hasPrefix(".VPN Switch.app.update-staging.") }
+        #expect(leftoverStaging.isEmpty, "unexpected leftover staging entries: \(leftoverStaging)")
+
+        // Mount detached.
+        #expect(!(try volumeIsMounted(named: volName)))
+
+        // DMG still present (left for diagnosis on every failure path).
+        #expect(FileManager.default.fileExists(atPath: dmgPath))
     }
 
     /// When `expectedSHA256` is supplied but does not match the DMG on
@@ -482,6 +625,7 @@ struct UpdateSwapScriptLiveIntegrationTests {
             parentPID: try pidOfAlreadyExitedProcess(),
             installDir: installDir.path,
             bundleName: "VPN Switch.app",
+            bundleIdentifier: "ie.boboco.vpnswitch",
             relaunch: false,
             expectedSHA256: wrongDigest
         )
@@ -523,5 +667,24 @@ struct UpdateSwapScriptLiveIntegrationTests {
             Issue.record("ditto \(sourcePath) -> \(destinationPath) failed: \(output)")
         }
         #expect(process.terminationStatus == 0)
+    }
+
+    /// Reads `CFBundleIdentifier` out of `bundlePath/Contents/Info.plist`
+    /// using the real `/usr/libexec/PlistBuddy` binary -- the same tool the
+    /// generated script itself uses for its identity checks -- so tests
+    /// never reimplement plist-reading logic that could silently diverge
+    /// from what the script actually runs.
+    private func plistBuddyReadCFBundleIdentifier(bundlePath: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/libexec/PlistBuddy")
+        process.arguments = ["-c", "Print :CFBundleIdentifier", "\(bundlePath)/Contents/Info.plist"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
