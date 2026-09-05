@@ -9,10 +9,21 @@ import UserNotifications
 /// polling timer that keeps the icon/header truthful when state changes
 /// outside this app (Nord auto-reconnecting, Tailscale toggled from its own
 /// menu, etc.) -- see dns-config-qsk.6.
+///
+/// All user-initiated vpn-ctl.sh mutations and refreshes are routed through
+/// `queue` (an `ActionQueue`, dns-config-cr9.2) rather than run directly:
+/// action methods below (`toggleNord()`, `toggleTailscale()`, `turnAllOff()`,
+/// `turnAllOn()`, `refresh()`) only ever *enqueue* an intent -- capturing the
+/// desired target state at click time from the currently displayed status --
+/// and the queue serialises actual execution one command at a time via
+/// `perform(_:)`, the single place vpn-ctl.sh is invoked for user actions.
+/// This guarantees at most one mutation runs at a time without the menu
+/// needing to disable itself to prevent overlap (see dns-config-cr9.3); a
+/// second click while one is in flight coalesces into the queue per the
+/// rules documented on `ActionQueue`.
 @MainActor
 final class AppModel: ObservableObject {
     @Published var status: VPNStatus = VPNStatus()
-    @Published var isSwitching: Bool = false
     @Published var headerMessage: String? = nil
     @Published var scriptMissingPath: String? = nil
     /// "Launch at login" toggle state, mirrored from SMAppService.mainApp
@@ -71,8 +82,37 @@ final class AppModel: ObservableObject {
     /// a counter/log").
     private(set) var lanDNSSyncCount = 0
 
+    /// The serial intent queue that owns all user-initiated vpn-ctl.sh
+    /// mutations/refreshes (see the class doc comment). Declared as an
+    /// implicitly-unwrapped optional and constructed in the second half of
+    /// `init()` -- its `statusProvider`/`runner` closures capture `self`,
+    /// which Swift only allows once all other stored properties have been
+    /// given initial values. This is the smallest fix for that ordering
+    /// requirement; `queue` is non-nil for the entire lifetime of the app
+    /// after `init()` returns, so every other use of it below can treat it
+    /// as non-optional.
+    private(set) var queue: ActionQueue!
+    private var cancellables = Set<AnyCancellable>()
+
+    /// True while an ActionQueue command is running (derived from `queue`,
+    /// not stored) -- the menu observes this to show "Switching…" without
+    /// needing to disable itself.
+    var isSwitching: Bool { queue.isBusy }
+    /// Human-readable label of the command currently executing, if any (e.g.
+    /// "NordVPN on"), for display alongside "Switching…".
+    var activeActionLabel: String? { queue.activeCommand?.label }
+    /// Human-readable labels of intents still waiting to run once the
+    /// active command finishes.
+    var queuedActionLabels: [String] { queue.queuedLabels }
+
     init() {
         notifyOnExternalChanges = (UserDefaults.standard.object(forKey: Self.notifyKey) as? Bool) ?? true
+        queue = ActionQueue(
+            autoDrain: true,
+            statusProvider: { [unowned self] in self.status },
+            runner: { [weak self] cmd in await self?.perform(cmd) }
+        )
+        queue.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
     }
 
     /// Starts the periodic poll loop and the wake observer. Call once from
@@ -134,35 +174,54 @@ final class AppModel: ObservableObject {
         apply(outcome: outcome, actionDescription: "status")
     }
 
-    /// Runs `vpn-ctl.sh status` once, off the main thread, and renders the
-    /// result. Called on launch and from "Refresh".
+    /// Enqueues a status refresh. Called on launch and from "Refresh". A
+    /// mutation already re-runs status as part of `perform(_:)`, so a
+    /// refresh enqueued alongside a pending mutation is subsumed by it (see
+    /// `ActionQueue`) and produces no extra `.status` call.
     func refresh() {
-        selfInitiatedChangeInFlight = true
-        Task.detached { [weak self] in
-            let outcome = VPNCtl.run(["status"])
-            await self?.apply(outcome: outcome, actionDescription: "status")
-            await MainActor.run { self?.selfInitiatedChangeInFlight = false }
-        }
+        queue.enqueueRefresh()
     }
 
-    /// Toggles NordVPN to the opposite of its current state.
+    /// Toggles NordVPN to the opposite of its currently displayed state. The
+    /// target state is fixed at click time from `status`, not re-evaluated
+    /// later -- if a second click arrives while an earlier intent for this
+    /// target is still queued (not yet drained), it replaces that pending
+    /// intent per `ActionQueue`'s coalescing rules; a click while the
+    /// opposite state is *actively running* is recorded as the next intent
+    /// to run once the queue drains again.
     func toggleNord() {
-        let target = status.nord.isOn ? "off" : "on"
-        runToggle(args: ["nord", target])
+        queue.enqueue(.nord, status.nord.isOn ? .off : .on)
     }
 
-    /// Toggles Tailscale to the opposite of its current state.
+    /// Toggles Tailscale to the opposite of its currently displayed state.
+    /// See `toggleNord()` for the click-time/coalescing semantics.
     func toggleTailscale() {
-        let target = status.ts.isOn ? "off" : "on"
-        runToggle(args: ["tailscale", target])
+        queue.enqueue(.tailscale, status.ts.isOn ? .off : .on)
     }
 
-    /// Turns both NordVPN and Tailscale off via `vpn-ctl.sh all off`. Given
-    /// a longer timeout than the default toggle: `all off` runs two
-    /// sequential waits of up to VPN_CTL_WAIT_TIMEOUT (45s) each plus web
-    /// checks, so it can exceed the default 60s.
+    /// Turns both NordVPN and Tailscale off via `vpn-ctl.sh all off` (or two
+    /// separate `off` commands if the queue observes at drain time that only
+    /// one target still needs it). Must use `enqueueAll` rather than two
+    /// separate `enqueue` calls: the two intents only merge into a single
+    /// `all off` invocation when both are present in the pending map at the
+    /// same drain snapshot (see `ActionQueue`).
     func turnAllOff() {
-        runToggle(args: ["all", "off"], timeout: 120)
+        queue.enqueueAll(.off)
+    }
+
+    /// Turns both NordVPN and Tailscale on via `vpn-ctl.sh all on` (or two
+    /// separate `on` commands as needed). See `turnAllOff()` for why
+    /// `enqueueAll` must be used instead of two `enqueue` calls.
+    func turnAllOn() {
+        queue.enqueueAll(.on)
+    }
+
+    /// Discards any not-yet-started queued intents (pending target states
+    /// and/or a pending refresh) without touching a command already in
+    /// flight. Used by Quit (dns-config-cr9.4) so quitting doesn't leave a
+    /// stale intent that would otherwise run on the next drain.
+    func discardPendingActions() {
+        queue.discardPending()
     }
 
     /// Opens the Tailscale app (used by the "Open Tailscale…" menu item
@@ -197,44 +256,69 @@ final class AppModel: ObservableObject {
         loginItemRegistered = LoginItem.isRegistered
     }
 
-    private func runToggle(args: [String], timeout: TimeInterval = 60) {
-        guard !isSwitching else { return }
-        isSwitching = true
+    /// The single place vpn-ctl.sh is invoked for user actions -- the
+    /// `runner` closure `queue` awaits for each `VPNCommand` it decides to
+    /// run. Behaviour matches the pre-queue `runToggle`/`refresh` exactly:
+    /// `.status` applies a plain status re-run; `.set`/`.setAll` clear any
+    /// prior header message, run the mutation, then always re-run status
+    /// afterward, preserving the mutation's own error message through that
+    /// re-run if the mutation failed (so a successful status poll doesn't
+    /// silently clear a real error).
+    ///
+    /// `selfInitiatedChangeInFlight` is set for the full duration of this
+    /// call (cleared via `defer`) so `apply(outcome:)`'s
+    /// notifyIfExternalChange/syncLANDNSIfNeeded logic continues to treat
+    /// every change this method causes as self-initiated, not external.
+    ///
+    /// Edge cases: if vpn-ctl.sh reports exit 0 with no actual state change
+    /// (the queue's own pruning already avoids issuing genuinely redundant
+    /// commands, but vpn-ctl.sh itself may also no-op), `apply` treats exit
+    /// 0 as success and sets no header message. If the script is missing
+    /// (`.scriptNotFound`), `apply` still returns normally without throwing,
+    /// so this method returns and the queue's drain loop proceeds/clears
+    /// `isBusy` as usual. A non-zero exit from a lock held by an external
+    /// vpn-ctl.sh invocation (exit 6) surfaces like any other failure via
+    /// `apply`'s normal exit-code handling -- no retry is attempted here.
+    private func perform(_ cmd: VPNCommand) async {
         selfInitiatedChangeInFlight = true
-        headerMessage = nil
-        Task.detached { [weak self] in
-            let outcome = VPNCtl.run(args, timeout: timeout)
-            let toggleFailed = await self?.apply(
+        defer { selfInitiatedChangeInFlight = false }
+        switch cmd {
+        case .status:
+            let outcome = await Task.detached { VPNCtl.run(["status"]) }.value
+            apply(outcome: outcome, actionDescription: "status")
+        case .set, .setAll:
+            headerMessage = nil
+            let args = cmd.args
+            let timeout = cmd.timeout
+            let outcome = await Task.detached { VPNCtl.run(args, timeout: timeout) }.value
+            let failed = apply(
                 outcome: outcome,
                 actionDescription: args.joined(separator: " "),
                 timeout: timeout
-            ) ?? false
-            let messageToPreserve = toggleFailed ? await self?.headerMessage ?? nil : nil
+            )
+            let messageToPreserve = failed ? headerMessage : nil
             // Re-run status regardless of outcome, per spec: "re-run status".
-            // If the toggle itself failed, preserve its error message in the
-            // header rather than letting the (successful) status re-run
+            // If the mutation itself failed, preserve its error message in
+            // the header rather than letting the (successful) status re-run
             // silently clear it.
-            let statusOutcome = VPNCtl.run(["status"])
-            _ = await self?.apply(
+            let statusOutcome = await Task.detached { VPNCtl.run(["status"]) }.value
+            apply(
                 outcome: statusOutcome,
                 actionDescription: "status",
-                clearSwitching: true,
                 preserveMessageOnSuccess: messageToPreserve
             )
-            await MainActor.run { self?.selfInitiatedChangeInFlight = false }
         }
     }
 
     /// Applies a VPNCtlResult/error to published state. Always called on the
-    /// main actor via the `await self?.apply` hop from a detached task.
-    /// Returns whether this call represented a failure (non-zero exit,
-    /// timeout, or missing script) -- used by runToggle to decide whether to
-    /// preserve the error message through the follow-up status re-run.
+    /// main actor. Returns whether this call represented a failure (non-zero
+    /// exit, timeout, or missing script) -- used by `perform(_:)` to decide
+    /// whether to preserve the error message through the follow-up status
+    /// re-run.
     @discardableResult
     private func apply(
         outcome: Result<VPNCtlResult, VPNCtlError>,
         actionDescription: String,
-        clearSwitching: Bool = false,
         preserveMessageOnSuccess: String? = nil,
         timeout: TimeInterval = 60
     ) -> Bool {
@@ -269,9 +353,6 @@ final class AppModel: ObservableObject {
             } else {
                 headerMessage = nil
             }
-        }
-        if clearSwitching {
-            isSwitching = false
         }
         notifyIfExternalChange(from: previousStatus, to: status)
         // Independent of notifyOnExternalChanges -- the resolver must stay
