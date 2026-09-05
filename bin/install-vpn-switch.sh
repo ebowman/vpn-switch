@@ -3,6 +3,15 @@
 # it plus the control scripts it drives, with NO sudo by default
 # (dns-config-qsk.7 DESIGN ADJUSTMENT).
 #
+# THIS IS THE BOOTSTRAP PATH ONLY. Run this once to get the first
+# Developer-ID-signed build onto the machine (an ad-hoc build, including
+# whatever this script itself produces, has no self-updater -- see
+# UpdateInstaller.swift/UpdateChecker.swift and docs/runbook.md's "Updating"
+# and "Releasing" sections). After that first hand-install, VPN Switch
+# checks GitHub for newer releases itself and installs signed, notarized
+# updates in place -- you should not normally need to re-run this script
+# just to pick up a new version.
+#
 # Usage:
 #   bash bin/install-vpn-switch.sh
 #   INSTALL_PREFIX=/usr/local bash bin/install-vpn-switch.sh   # opt-in, see below

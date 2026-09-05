@@ -26,7 +26,10 @@ two coexist. **VPN Switch**, a menu bar app, gives
 independent on/off control of each VPN, plus "Turn All VPNs On" and "Turn
 All VPNs Off" items (`vpn-ctl.sh all on|off` on the CLI) to bring both up
 or down at once; the menu stays responsive throughout — clicks made while
-a switch is running are queued and run in order. A local dnsmasq resolver
+a switch is running are queued and run in order. VPN Switch checks GitHub
+automatically for newer releases and, once you approve, installs a
+signed, Apple-notarized update in place — see
+[docs/runbook.md](docs/runbook.md#updating). A local dnsmasq resolver
 for the
 `home.arpa` suffix makes bare LAN hostnames (`streamy`, not
 `streamy.tail...ts.net`) resolve correctly whether Tailscale is on or off.
@@ -70,6 +73,10 @@ and [ADR-003](docs/adr-003-lan-fallback.md) (the LAN fallback).
 
 Full step-by-step detail, troubleshooting, and daily-use notes:
 [docs/runbook.md](docs/runbook.md).
+
+**Development:** `make build` / `make test` (SwiftPM under `app/VPNSwitch`);
+CI runs both plus a shell syntax check on every push/PR. Release process:
+[docs/runbook.md § Releasing](docs/runbook.md#releasing).
 
 ## 4. What is in the repo
 
