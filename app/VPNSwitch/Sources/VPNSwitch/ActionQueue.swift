@@ -137,11 +137,15 @@ final class ActionQueue: ObservableObject {
     /// Labels of currently pending intents, in `VPNTarget.allCases` order
     /// (e.g. ["NordVPN on", "Tailscale off"]), plus "Refresh" appended when a
     /// refresh is pending and there are no pending target intents.
+    ///
+    /// Derived from `VPNCommand.label` (dns-config-l6s) rather than building
+    /// the strings inline, so this display text cannot drift from the label
+    /// shown once the command actually runs.
     var queuedLabels: [String] {
         var labels: [String] = []
         for target in VPNTarget.allCases {
             if let state = pendingIntents[target] {
-                labels.append("\(target.displayName) \(state.cliName)")
+                labels.append(VPNCommand.set(target, state).label)
             }
         }
         if refreshPending && pendingIntents.isEmpty {

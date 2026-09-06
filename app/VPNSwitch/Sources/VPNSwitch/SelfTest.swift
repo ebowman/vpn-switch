@@ -105,6 +105,13 @@ enum SelfTest {
                 runner: { [unowned self] cmd in
                     self.inFlight += 1
                     self.maxInFlight = max(self.maxInFlight, self.inFlight)
+                    // Genuinely suspend here (dns-config-l6s): without a real
+                    // await, this closure never yields the main actor, so a
+                    // second concurrent drain() could never actually overlap
+                    // with this one and the maxInFlight assertions below
+                    // could never fail regardless of ActionQueue correctness.
+                    await Task.yield()
+                    try? await Task.sleep(for: .milliseconds(5))
                     self.midRunHook?(cmd, self.queue)
                     self.log.append(cmd.args.joined(separator: " "))
                     self.inFlight -= 1
@@ -244,6 +251,52 @@ enum SelfTest {
             h.queue.discardPending()
             await h.queue.drain()
             h.check("H discard", expected: [])
+
+            // I: concurrent drain -- calling drain() a second time while the
+            // first call is already suspended inside the runner (i.e.
+            // genuinely in flight, not just scheduled) must not let the
+            // second call re-enter the runner concurrently; the second
+            // call's `guard !isBusy` makes it an immediate no-op instead.
+            //
+            // This needs a *second* pending intent (enqueued only after the
+            // first drain's runner call is confirmed suspended) for the
+            // second drain() call to find and act on -- otherwise the
+            // second call's `pendingIntents` snapshot is already empty
+            // (drained synchronously by the first call before its first
+            // await) and it returns having never reached the runner at
+            // all, which would pass trivially even with the isBusy guard
+            // removed and prove nothing.
+            h.reset(status: VPNStatus.parse("nord=down ts=Running web=ok streamy=fail"))
+            h.queue.enqueue(.nord, .on)
+            let drainA = Task { await h.queue.drain() }
+            while h.inFlight == 0 {
+                await Task.yield()
+            }
+            h.queue.enqueue(.tailscale, .off)
+            let drainB = Task { await h.queue.drain() }
+            _ = await (drainA.value, drainB.value)
+            h.check("I concurrent drain", expected: ["nord on", "tailscale off"])
+            if h.maxInFlight > 1 {
+                h.failed = true
+                print("FAIL I concurrent drain: max concurrency expected 1 got \(h.maxInFlight)")
+            }
+
+            // J: mid-run enqueue while suspended -- enqueuing a second
+            // intent while the first command is still suspended inside the
+            // runner must not run concurrently with it; it is picked up by
+            // drain()'s next loop iteration only after the first command
+            // returns, preserving order (nord on, then tailscale off).
+            h.reset(status: VPNStatus.parse("nord=down ts=Running web=ok streamy=fail"))
+            h.queue.enqueue(.nord, .on)
+            let drainTask = Task { await h.queue.drain() }
+            try? await Task.sleep(for: .milliseconds(1))
+            h.queue.enqueue(.tailscale, .off)
+            await drainTask.value
+            h.check("J mid-run enqueue while suspended", expected: ["nord on", "tailscale off"])
+            if h.maxInFlight > 1 {
+                h.failed = true
+                print("FAIL J mid-run enqueue while suspended: max concurrency expected 1 got \(h.maxInFlight)")
+            }
 
             // queuedLabels eyeball check (before draining).
             h.reset()

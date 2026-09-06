@@ -55,4 +55,17 @@ struct ActionQueueTests {
         await h.queue.drain()
         #expect(h.log == [])
     }
+
+    /// dns-config-l6s: queuedLabels must derive each target/state label from
+    /// VPNCommand.label so the two cannot drift -- asserted directly against
+    /// VPNCommand rather than duplicating its formatting logic here.
+    @Test func queuedLabelsMatchVPNCommandLabel() async {
+        let h = ActionQueueTestHarness(status: VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail"))
+        h.queue.enqueue(.nord, .on)
+        h.queue.enqueue(.tailscale, .off)
+        #expect(h.queue.queuedLabels == [
+            VPNCommand.set(.nord, .on).label,
+            VPNCommand.set(.tailscale, .off).label
+        ])
+    }
 }
