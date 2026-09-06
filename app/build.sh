@@ -45,14 +45,19 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 echo "==> bundling control scripts into ${SCRIPTS_RES_DIR}"
 
 VPN_CTL_SRC="${REPO_ROOT}/bin/vpn-ctl.sh"
-LAN_HOSTS_CONF_SRC="${REPO_ROOT}/config/lan-hosts.conf"
+# Only the EXAMPLE lan-hosts.conf is ever bundled (dns-config-c4r): the real,
+# user-owned lan-hosts.conf is never shipped inside the app bundle, even if a
+# real copy happens to exist in this checkout (see config/lan-hosts.conf in
+# .gitignore). ScriptBundle.swift creates the installed lan-hosts.conf from
+# this example only if the installed copy is absent, and never overwrites it.
+LAN_HOSTS_CONF_EXAMPLE_SRC="${REPO_ROOT}/config/lan-hosts.conf.example"
 
 if [ ! -f "${VPN_CTL_SRC}" ]; then
     echo "build.sh: missing ${VPN_CTL_SRC}" >&2
     exit 1
 fi
-if [ ! -f "${LAN_HOSTS_CONF_SRC}" ]; then
-    echo "build.sh: missing ${LAN_HOSTS_CONF_SRC}" >&2
+if [ ! -f "${LAN_HOSTS_CONF_EXAMPLE_SRC}" ]; then
+    echo "build.sh: missing ${LAN_HOSTS_CONF_EXAMPLE_SRC}" >&2
     exit 1
 fi
 if ! compgen -G "${REPO_ROOT}/lib/*.sh" > /dev/null; then
@@ -66,7 +71,7 @@ mkdir -p "${SCRIPTS_RES_DIR}/config"
 
 cp "${VPN_CTL_SRC}" "${SCRIPTS_RES_DIR}/bin/vpn-ctl.sh"
 cp "${REPO_ROOT}"/lib/*.sh "${SCRIPTS_RES_DIR}/lib/"
-cp "${LAN_HOSTS_CONF_SRC}" "${SCRIPTS_RES_DIR}/config/lan-hosts.conf"
+cp "${LAN_HOSTS_CONF_EXAMPLE_SRC}" "${SCRIPTS_RES_DIR}/config/lan-hosts.conf.example"
 
 chmod 0755 "${SCRIPTS_RES_DIR}/bin/vpn-ctl.sh"
 chmod 0755 "${SCRIPTS_RES_DIR}"/lib/*.sh

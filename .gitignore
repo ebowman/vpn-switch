@@ -16,3 +16,9 @@ config/nord-ikev2/*.env
 # Captured evidence from bin/dns-snapshot.sh / dns-watch.sh: local only, contains
 # tailnet/LAN details. Never committed (history purged 2026-09-05).
 snapshots/
+
+# lan-hosts.conf is the user-owned real hosts file (dns-config-c4r): the repo
+# ships config/lan-hosts.conf.example instead. A local, real copy here in the
+# checkout is fine and expected for development (scripts resolve it via
+# lib/lan-hosts.sh's repo-relative path) -- it is just never tracked/committed.
+config/lan-hosts.conf

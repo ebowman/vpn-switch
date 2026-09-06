@@ -131,12 +131,15 @@ anything. Full detail: [`docs/switcher/nord-ikev2-setup.md`](switcher/nord-ikev2
 bash bin/install-vpn-switch.sh
 ```
 
-Builds the app, installs `vpn-ctl.sh`, its libs, and a copy of
-`config/lan-hosts.conf` to `~/Library/Application
+Builds the app, installs `vpn-ctl.sh`, its libs, and the shipped
+`config/lan-hosts.conf.example` to `~/Library/Application
 Support/vpn-switch/{bin,lib,config}/` (no sudo), and copies the app to
-`/Applications/VPN Switch.app`. Safe to re-run. Re-run this after editing
-`config/lan-hosts.conf` so the installed copy the app and `vpn-ctl.sh` use
-stays in sync (`dns-config-1ww`) — see "Add a host" in
+`/Applications/VPN Switch.app`. The first time this runs it also creates
+`~/Library/Application Support/vpn-switch/config/lan-hosts.conf` from that
+example — this is your real, user-owned hosts file; edit it directly to add
+or change hosts (it is never overwritten by a later install or app sync,
+even though the example alongside it is refreshed each time). Safe to
+re-run. See "Add a host" in
 [`docs/hostnames/lan-dns.md`](hostnames/lan-dns.md).
 
 The app is ad-hoc signed, so Gatekeeper may warn on first launch ("cannot be
@@ -333,15 +336,18 @@ builds (see below) never offer to self-update. This is not a bug to work
 around.
 
 **Scripts stay in sync automatically.** The app bundles its own copy of
-`bin/vpn-ctl.sh`, `lib/*.sh`, and `config/lan-hosts.conf`. On every launch
-it compares a version stamp (`.installed-version`) against what's already
-installed under `~/Library/Application Support/vpn-switch`, and also
+`bin/vpn-ctl.sh`, `lib/*.sh`, and `config/lan-hosts.conf.example`. On every
+launch it compares a version stamp (`.installed-version`) against what's
+already installed under `~/Library/Application Support/vpn-switch`, and also
 compares the bundled and installed scripts byte-for-byte, re-copying those
 files if either the stamp differs, `vpn-ctl.sh` is missing there, or any
 installed script's contents no longer match the bundled copy (a stale or
 tampered installed lib is repaired on the next launch even if the version
-stamp still matches). So a self-update that only replaces the `.app` also
-brings the control scripts up to date without needing to re-run
+stamp still matches). This sync only ever touches `lan-hosts.conf.example`,
+never your real `lan-hosts.conf` — that file is created once (from the
+example) if it doesn't already exist, and is never overwritten afterward, so
+your edits always survive. So a self-update that only replaces the `.app`
+also brings the control scripts up to date without needing to re-run
 `install-vpn-switch.sh`. The same sync can be run headlessly with
 `VPNSwitch --sync-scripts`. Either way, the scripts always *run* from
 Application Support, never from inside the signed app bundle.
@@ -548,7 +554,8 @@ bash bin/lan-dns-uninstall.sh
 
 Unloads the dnsmasq LaunchAgent and removes the generated dnsmasq
 config/logs, the rendered hosts file, and the pid file — no sudo. It
-deliberately leaves `config/lan-hosts.conf` (repo source) and does not run
+deliberately leaves `lan-hosts.conf` (your real, user-owned hosts file,
+wherever `lib/lan-hosts.sh` resolved it from) and does not run
 `brew uninstall dnsmasq` in place. It then prints, but does not run, the
 matching root-level undo:
 
@@ -572,10 +579,15 @@ nothing else on the machine uses it. If you also want to remove the
   `lan-dns-install.sh` / `lan-dns-uninstall.sh` (ADR-003 LAN DNS fallback).
 - `lib/` — shared, sourceable logic: `nord-ctl.sh`, `nord-detect.sh`,
   `tailscale-ctl.sh`, `lan-dns.sh` (dnsmasq LaunchAgent status/sync),
-  `lan-hosts.sh` (renders `config/lan-hosts.conf` into dnsmasq's hosts file).
+  `lan-hosts.sh` (resolves and renders `lan-hosts.conf`, your real,
+  user-owned hosts file, into dnsmasq's hosts file).
 - `app/` — the VPN Switch SwiftUI menu bar app (`app/VPNSwitch/`).
-- `config/lan-hosts.conf` — source of LAN/tailnet addresses for the LAN DNS
-  fallback (ADR-003); one line per host.
+- `config/lan-hosts.conf.example` — shipped template for `lan-hosts.conf`
+  (LAN/tailnet addresses for the LAN DNS fallback, ADR-003; one line per
+  host). Your real, user-owned `lan-hosts.conf` lives at
+  `~/Library/Application Support/vpn-switch/config/lan-hosts.conf` once
+  installed (or as an untracked `config/lan-hosts.conf` in a repo checkout)
+  — edit it directly; it is never overwritten.
 - `docs/` — `adr-001-hostname-resolution.md` (superseded by ADR-002, kept for
   its corrected-mechanism appendix), `adr-002-nordvpn-ikev2.md` (current
   decision), `adr-003-lan-fallback.md` (LAN DNS fallback for Tailscale-off),

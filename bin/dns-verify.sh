@@ -110,7 +110,62 @@ else
     LAN_DNS_LIB_AVAILABLE=0
 fi
 
-HOSTS=(streamy mac-mini)
+# The two hosts this script checks are the first two configured in
+# lan-hosts.conf (dns-config-c4r), rather than hardcoded names. Falls back to
+# an empty list if lib/lan-hosts.sh is unavailable/unreadable -- the per-host
+# loops below simply iterate zero times in that case.
+HOSTS=()
+if [ "${LAN_HOSTS_AVAILABLE}" -eq 1 ]; then
+    while IFS= read -r _h; do
+        [ -n "${_h}" ] || continue
+        HOSTS+=("${_h}")
+    done < <(lan_hosts_names | head -2)
+fi
+
+# HOSTS[0]/[1] are used below for the service-reachability checks, which
+# probe a specific known service on each (dns-config-c4r: derived from
+# config rather than hardcoded names, but the specific ports/labels below
+# are still this script's own knowledge of what those two hosts run).
+HOST1="${HOSTS[0]:-}"
+HOST2="${HOSTS[1]:-}"
+
+# The tailnet's MagicDNS suffix (e.g. "tailXXXX.ts.net"), derived from a live
+# 'tailscale status --json' rather than hardcoded. Empty if unavailable --
+# callers must use a generic hint or SKIP rather than guessing (dns-config-c4r).
+TAILNET_SUFFIX=""
+detect_tailnet_suffix() {
+    # Deliberately absolute, no PATH fallback (matches lib/tailscale-ctl.sh's
+    # TS_CTL_BIN convention).
+    local ts_bin="/usr/local/bin/tailscale"
+    [ -x "${ts_bin}" ] || return 1
+    local json
+    json="$("${ts_bin}" status --json 2>/dev/null)" || return 1
+    [ -n "${json}" ] || return 1
+    if command -v /usr/bin/python3 >/dev/null 2>&1; then
+        TAILNET_SUFFIX="$(printf '%s' "${json}" | /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("MagicDNSSuffix", "") or "")
+except Exception:
+    pass
+' 2>/dev/null)"
+    fi
+    [ -n "${TAILNET_SUFFIX}" ]
+}
+detect_tailnet_suffix || TAILNET_SUFFIX=""
+
+# The home-LAN /24 prefix (e.g. "192.0.2.") used by the network-state summary
+# to recognize "on the home LAN", derived from the first host's configured
+# LAN IP rather than hardcoded (dns-config-c4r). Empty if unavailable.
+HOME_LAN_PREFIX=""
+if [ "${LAN_HOSTS_AVAILABLE}" -eq 1 ] && [ -n "${HOST1}" ]; then
+    _host1_lan_ip="$(lan_hosts_lan_ip "${HOST1}")"
+    if [ -n "${_host1_lan_ip}" ]; then
+        HOME_LAN_PREFIX="${_host1_lan_ip%.*}."
+    fi
+    unset _host1_lan_ip
+fi
 
 # Portable "map keyed by host name" helpers (no associative arrays: the
 # system /bin/bash on this machine is 3.2, which lacks them). Hyphens in
@@ -368,7 +423,14 @@ check_staleness() {
                 record PASS "$(printf 'PASS  staleness  %-16s -> matches live Tailscale IP (%s)' "${host}" "${resolved}")"
                 ;;
             stale)
-                record FAIL "$(printf 'FAIL  staleness  %-16s -> resolves to %s but live Tailscale IP is %s; check /etc/hosts or /etc/resolver/tailXXXX.ts.net' "${host}" "${resolved}" "${expected}")"
+                local _resolver_hint
+                if [ -n "${TAILNET_SUFFIX}" ]; then
+                    _resolver_hint="/etc/resolver/${TAILNET_SUFFIX}"
+                else
+                    _resolver_hint="/etc/resolver/<tailnet>.ts.net"
+                fi
+                record FAIL "$(printf 'FAIL  staleness  %-16s -> resolves to %s but live Tailscale IP is %s; check /etc/hosts or %s' "${host}" "${resolved}" "${expected}" "${_resolver_hint}")"
+                unset _resolver_hint
                 ;;
             *)
                 record SKIP "$(printf 'SKIP  staleness  %-16s -> could not compare (missing data)' "${host}")"
@@ -452,10 +514,11 @@ network_state_summary() {
     local en0_inet
     en0_inet="$(ifconfig en0 2>/dev/null | awk '/inet /{print $2; exit}')"
     if [ -n "${en0_inet}" ]; then
-        case "${en0_inet}" in
-            192.168.1.*) home_lan_state="yes (en0: ${en0_inet})" ;;
-            *) home_lan_state="no (en0: ${en0_inet})" ;;
-        esac
+        if [ -n "${HOME_LAN_PREFIX}" ] && case "${en0_inet}" in "${HOME_LAN_PREFIX}"*) true ;; *) false ;; esac; then
+            home_lan_state="yes (en0: ${en0_inet})"
+        else
+            home_lan_state="no (en0: ${en0_inet})"
+        fi
     fi
 
     local lan_dns_state
@@ -494,8 +557,8 @@ for h in "${HOSTS[@]}"; do
     check_name_resolution "${h}"
 done
 
-check_service_any_port streamy "synology-webui" 5000 5001
-check_service_any_port mac-mini "ssh" 22
+[ -n "${HOST1}" ] && check_service_any_port "${HOST1}" "synology-webui" 5000 5001
+[ -n "${HOST2}" ] && check_service_any_port "${HOST2}" "ssh" 22
 
 for h in "${HOSTS[@]}"; do
     check_staleness "${h}"

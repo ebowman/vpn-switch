@@ -24,12 +24,17 @@
 #     (vpn-ctl.sh resolves its libs as "<its own dir>/../lib/*.sh" -- the
 #     case-guard repo-root pattern -- so bin/ and lib/ are installed as
 #     siblings under .../vpn-switch/, matching that layout exactly.)
-#   - config/lan-hosts.conf                       -> "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf"
-#     (lib/lan-hosts.sh resolves LAN_HOSTS_CONF as "<its own dir>/../config/lan-hosts.conf",
+#   - config/lan-hosts.conf.example                -> "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf.example"
+#     (always installed/refreshed) and, ONLY IF ABSENT there,
+#     "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf"
+#     is created from that example (dns-config-c4r: lan-hosts.conf is the
+#     REAL, user-owned hosts file and is NEVER overwritten once it exists --
+#     edit it directly under Application Support to add/change hosts).
+#     lib/lan-hosts.sh resolves LAN_HOSTS_CONF as "<its own dir>/../config/lan-hosts.conf",
 #     so config/ is installed as a sibling of bin/ and lib/, matching that
-#     layout exactly -- dns-config-1ww. Only lan-hosts.conf is copied, never
-#     the rest of config/ (e.g. config/nord-ikev2/), which is out of scope
-#     for this installed layout.)
+#     layout exactly -- dns-config-1ww. Only lan-hosts.conf(.example) is
+#     copied, never the rest of config/ (e.g. config/nord-ikev2/), which is
+#     out of scope for this installed layout.
 #
 # INSTALL_PREFIX=/usr/local is an OPT-IN alternative install location for the
 # scripts (NOT the app, which always goes to /Applications). It requires
@@ -142,11 +147,25 @@ install_scripts_to() {
     done
     [ "${_lib_ok}" = "1" ] || return 1
 
-    if ! cp "${REPO_ROOT}/config/lan-hosts.conf" "${_config_dir}/lan-hosts.conf"; then
-        echo "install-vpn-switch: failed to copy lan-hosts.conf" >&2
+    if ! cp "${REPO_ROOT}/config/lan-hosts.conf.example" "${_config_dir}/lan-hosts.conf.example"; then
+        echo "install-vpn-switch: failed to copy lan-hosts.conf.example" >&2
         return 1
     fi
-    echo "    installed lan-hosts.conf"
+    echo "    installed lan-hosts.conf.example"
+
+    # config/lan-hosts.conf is the REAL, user-owned hosts file: create it
+    # from the example ONLY if it does not already exist, and never
+    # overwrite it otherwise (dns-config-c4r).
+    if [ -e "${_config_dir}/lan-hosts.conf" ]; then
+        echo "    lan-hosts.conf already present -- left untouched"
+    else
+        if ! cp "${REPO_ROOT}/config/lan-hosts.conf.example" "${_config_dir}/lan-hosts.conf"; then
+            echo "install-vpn-switch: failed to create lan-hosts.conf" >&2
+            return 1
+        fi
+        echo "    created lan-hosts.conf from lan-hosts.conf.example"
+    fi
+    echo "    edit ${_config_dir}/lan-hosts.conf directly to add/change your real hosts"
 
     return 0
 }
@@ -163,7 +182,8 @@ if [ -n "${INSTALL_PREFIX}" ]; then
         _lib_base="${_lib_file##*/}"
         echo "        sudo cp '${_lib_file}' '${INSTALL_PREFIX}/lib/${_lib_base}'"
     done
-    echo "        sudo cp '${REPO_ROOT}/config/lan-hosts.conf' '${INSTALL_PREFIX}/config/lan-hosts.conf'"
+    echo "        sudo cp '${REPO_ROOT}/config/lan-hosts.conf.example' '${INSTALL_PREFIX}/config/lan-hosts.conf.example'"
+    echo "        sudo cp '${REPO_ROOT}/config/lan-hosts.conf.example' '${INSTALL_PREFIX}/config/lan-hosts.conf'  # only if lan-hosts.conf does not already exist there"
     echo "        sudo chmod +x '${INSTALL_PREFIX}/bin/vpn-ctl.sh' '${INSTALL_PREFIX}/lib/'*.sh"
     echo
     echo "    NOTE: vpn-ctl.sh resolves its libs as '<its own dir>/../lib/*.sh', and"
@@ -232,6 +252,9 @@ echo "  libs:         ${DEFAULT_LIB_DIR}/"
 echo "  config:       ${DEFAULT_CONFIG_DIR}/lan-hosts.conf"
 echo
 echo "Not touched: the IKEv2 profile (*.mobileconfig), NordVPN credentials, Shortcuts.app."
+echo
+echo "To add/change LAN hosts, edit '${DEFAULT_CONFIG_DIR}/lan-hosts.conf' directly --"
+echo "it is your real, user-owned copy and is never overwritten by this script or the app."
 echo
 echo "Launch: open '${APP_DEST}'"
 echo

@@ -1,8 +1,9 @@
 #!/bin/bash
 # lan-dns-install.sh -- installs the ADR-003 (option C) LAN-fallback
 # resolver: a user-level dnsmasq LaunchAgent, bound to 127.0.0.1:5354,
-# authoritative for the home.arpa suffix, answering from
-# config/lan-hosts.conf.
+# authoritative for the home.arpa suffix, answering from lan-hosts.conf (the
+# real, user-owned hosts file -- see lib/lan-hosts.sh for its resolution
+# order and config/lan-hosts.conf.example for the shipped template).
 #
 # See docs/adr-003-lan-fallback.md and docs/hostnames/lan-dns.md.
 #
@@ -70,9 +71,13 @@ fi
 # shellcheck source=lib/tailscale-ctl.sh
 . "${TS_CTL_LIB}"
 
-LAN_HOSTS_CONF="${REPO_ROOT}/config/lan-hosts.conf"
+# LAN_HOSTS_CONF is resolved by lib/lan-hosts.sh (sourced above): env
+# override, else the repo-checkout config/lan-hosts.conf if readable, else
+# the installed "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf"
+# (dns-config-c4r). Just validate readability here rather than hardcoding a
+# path, so this script honors whichever candidate that resolution picked.
 if [ ! -r "${LAN_HOSTS_CONF}" ]; then
-    echo "lan-dns-install: missing ${LAN_HOSTS_CONF}" >&2
+    echo "lan-dns-install: no readable lan-hosts.conf found (looked for ${LAN_HOSTS_CONF}); copy config/lan-hosts.conf.example to config/lan-hosts.conf (or to \"\$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf\") and edit it with your real hosts" >&2
     exit 1
 fi
 

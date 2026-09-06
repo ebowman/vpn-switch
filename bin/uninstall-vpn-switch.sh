@@ -9,14 +9,19 @@
 #   - /Applications/VPN Switch.app
 #   - "$HOME/Library/Application Support/vpn-switch/bin"
 #   - "$HOME/Library/Application Support/vpn-switch/lib"
-#   - "$HOME/Library/Application Support/vpn-switch/config"
-#     (installed copy of config/lan-hosts.conf -- dns-config-1ww; the repo's
-#     own config/ is never touched, only this installed sibling of bin/lib)
+#   - "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf.example"
+#     only -- the installed copy of the shipped example (dns-config-1ww,
+#     dns-config-c4r). The repo's own config/ is never touched, only this
+#     installed sibling of bin/lib.
 #   - the login item registration (SMAppService), via the app binary's own
 #     --unregister-login-item flag, run before the app is deleted
 #   - the ie.boboco.vpnswitch UserDefaults domain (best-effort)
 #
 # What this deliberately LEAVES BEHIND (printed at the end):
+#   - "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf"
+#     (dns-config-c4r: this is the REAL, user-owned hosts file -- never
+#     deleted by this script, even though the sibling .example and the rest
+#     of the config/ directory's contents it created ARE removed).
 #   - Any *.mobileconfig or *.env file under
 #     "$HOME/Library/Application Support/vpn-switch/" (the IKEv2 profile and
 #     Nord credentials live there too -- separate concern, never touched by
@@ -124,12 +129,23 @@ if [ -d "${LIB_DIR}" ]; then
 else
     echo "    not present: ${LIB_DIR}"
 fi
+# config/ holds the REAL, user-owned lan-hosts.conf (dns-config-c4r) as well
+# as the shipped lan-hosts.conf.example: remove only the example, and leave
+# lan-hosts.conf (and the config/ directory itself) in place.
 if [ -d "${CONFIG_DIR}" ]; then
-    if rm -rf "${CONFIG_DIR}"; then
-        echo "    removed ${CONFIG_DIR}"
+    CONFIG_EXAMPLE="${CONFIG_DIR}/lan-hosts.conf.example"
+    if [ -e "${CONFIG_EXAMPLE}" ]; then
+        if rm -f "${CONFIG_EXAMPLE}"; then
+            echo "    removed ${CONFIG_EXAMPLE}"
+        else
+            echo "uninstall-vpn-switch: failed to remove ${CONFIG_EXAMPLE}" >&2
+            exit 1
+        fi
     else
-        echo "uninstall-vpn-switch: failed to remove ${CONFIG_DIR}" >&2
-        exit 1
+        echo "    not present: ${CONFIG_EXAMPLE}"
+    fi
+    if [ -e "${CONFIG_DIR}/lan-hosts.conf" ]; then
+        echo "    leaving ${CONFIG_DIR}/lan-hosts.conf in place (your real, user-owned hosts file)"
     fi
 else
     echo "    not present: ${CONFIG_DIR}"
@@ -151,7 +167,7 @@ echo
 echo "Left behind on purpose (NOT removed):"
 if [ -d "${INSTALL_ROOT}" ]; then
     _left_any=0
-    for _f in "${INSTALL_ROOT}"/*.mobileconfig "${INSTALL_ROOT}"/*.env; do
+    for _f in "${INSTALL_ROOT}"/*.mobileconfig "${INSTALL_ROOT}"/*.env "${CONFIG_DIR}/lan-hosts.conf"; do
         [ -e "${_f}" ] || continue
         echo "  ${_f}"
         _left_any=1

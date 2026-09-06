@@ -1,8 +1,15 @@
 import Foundation
 
-/// Keeps the control scripts (bin/vpn-ctl.sh, lib/*.sh, config/lan-hosts.conf)
-/// under `~/Library/Application Support/vpn-switch` in sync with the copies
-/// shipped inside the app bundle (see app/build.sh, dns-config-8v7.3).
+/// Keeps the control scripts (bin/vpn-ctl.sh, lib/*.sh,
+/// config/lan-hosts.conf.example) under
+/// `~/Library/Application Support/vpn-switch` in sync with the copies shipped
+/// inside the app bundle (see app/build.sh, dns-config-8v7.3).
+///
+/// `config/lan-hosts.conf` itself (the REAL, user-owned hosts file) is never
+/// synced or compared: only `lan-hosts.conf.example` is. `sync(from:to:)`
+/// creates the installed `lan-hosts.conf` from the example ONLY the first
+/// time (when it does not already exist there), and never touches it again
+/// on subsequent syncs -- see `sync`'s doc comment (dns-config-c4r).
 ///
 /// WHY: a self-update replaces only the .app; the scripts the app drives are
 /// installed separately (bin/install-vpn-switch.sh) and would otherwise go
@@ -74,14 +81,21 @@ enum ScriptBundle {
         return false
     }
 
-    /// Compares every file `sync(from:to:)` would copy (bin/vpn-ctl.sh,
-    /// lib/*.sh, config/lan-hosts.conf) byte-for-byte between the bundled
-    /// and installed trees. Returns `true` (contents differ / need sync) if
-    /// ANY of those files differs, including when a bundled file is simply
-    /// missing on the installed side. Deliberately mirrors `sync`'s own
-    /// file allowlist -- it must NEVER be extended to compare credential
-    /// files (nord-ikev2.env, *.mobileconfig), which are intentionally
-    /// excluded from both functions.
+    /// Compares every file `sync(from:to:)` would unconditionally copy
+    /// (bin/vpn-ctl.sh, lib/*.sh, config/lan-hosts.conf.example)
+    /// byte-for-byte between the bundled and installed trees. Returns `true`
+    /// (contents differ / need sync) if ANY of those files differs,
+    /// including when a bundled file is simply missing on the installed
+    /// side. Deliberately mirrors `sync`'s own file allowlist -- it must
+    /// NEVER be extended to compare credential files (nord-ikev2.env,
+    /// *.mobileconfig), which are intentionally excluded from both
+    /// functions.
+    ///
+    /// Deliberately does NOT compare `config/lan-hosts.conf` (the real,
+    /// user-owned hosts file): that file is user data, created once by
+    /// `sync` if absent and never overwritten afterward, so comparing or
+    /// re-syncing it here would defeat that guarantee and could clobber a
+    /// user's real hosts with the example's contents (dns-config-c4r).
     ///
     /// Used to detect a tampered or stale installed copy even when the
     /// version stamp still matches (needsSync's other checks are stamp/
@@ -114,12 +128,13 @@ enum ScriptBundle {
             }
         }
 
-        // config/lan-hosts.conf
-        let lanHostsSrc = bundleDir.appendingPathComponent("config/lan-hosts.conf")
-        if fm.fileExists(atPath: lanHostsSrc.path) {
-            let dest = installDir.appendingPathComponent("config/lan-hosts.conf")
+        // config/lan-hosts.conf.example (NEVER config/lan-hosts.conf -- see
+        // the doc comment above).
+        let lanHostsExampleSrc = bundleDir.appendingPathComponent("config/lan-hosts.conf.example")
+        if fm.fileExists(atPath: lanHostsExampleSrc.path) {
+            let dest = installDir.appendingPathComponent("config/lan-hosts.conf.example")
             if !fm.fileExists(atPath: dest.path) { return false }
-            if !filesMatch(lanHostsSrc, dest) { return false }
+            if !filesMatch(lanHostsExampleSrc, dest) { return false }
         }
 
         return true
@@ -133,9 +148,16 @@ enum ScriptBundle {
     /// Copies the control scripts from `bundled` into `installed`.
     ///
     /// Copies (when present in `bundled`):
-    ///   - bin/vpn-ctl.sh
-    ///   - every lib/*.sh file present under bundled/lib
-    ///   - config/lan-hosts.conf
+    ///   - bin/vpn-ctl.sh (always overwritten)
+    ///   - every lib/*.sh file present under bundled/lib (always overwritten)
+    ///   - config/lan-hosts.conf.example (always overwritten)
+    ///   - config/lan-hosts.conf (the REAL, user-owned hosts file) is created
+    ///     from config/lan-hosts.conf.example ONLY IF IT DOES NOT ALREADY
+    ///     EXIST at the installed location. If it already exists -- e.g. a
+    ///     prior install or a user's hand-edited hosts -- it is left
+    ///     COMPLETELY UNTOUCHED, regardless of whether its bytes differ from
+    ///     the example (dns-config-c4r: the app must never overwrite the
+    ///     user's real lan-hosts.conf).
     ///
     /// Each file is written atomically: the new content is written to a
     /// sibling temp file (`<dest>.tmp-<uuid>`) in the destination directory,
@@ -147,7 +169,9 @@ enum ScriptBundle {
     /// bundled VERSION file's contents (trimmed of whitespace/newlines).
     ///
     /// Returns the relative paths (relative to `installed`) that were
-    /// written, including the stamp file.
+    /// written, including the stamp file. `config/lan-hosts.conf` is only
+    /// included in this list on the run that actually creates it (i.e. it
+    /// was absent beforehand).
     ///
     /// This function touches ONLY the files listed above (plus the stamp) --
     /// it never enumerates or deletes anything else under `installed` (e.g.
@@ -203,12 +227,23 @@ enum ScriptBundle {
             }
         }
 
-        // config/lan-hosts.conf
-        let lanHostsSrc = bundled.appendingPathComponent("config/lan-hosts.conf")
-        if fm.fileExists(atPath: lanHostsSrc.path) {
-            let dest = installed.appendingPathComponent("config/lan-hosts.conf")
-            try atomicCopy(sourceFile: lanHostsSrc, destFile: dest, executable: false)
-            written.append("config/lan-hosts.conf")
+        // config/lan-hosts.conf.example -- always overwritten, mirrors the
+        // bundled example exactly.
+        let lanHostsExampleSrc = bundled.appendingPathComponent("config/lan-hosts.conf.example")
+        if fm.fileExists(atPath: lanHostsExampleSrc.path) {
+            let exampleDest = installed.appendingPathComponent("config/lan-hosts.conf.example")
+            try atomicCopy(sourceFile: lanHostsExampleSrc, destFile: exampleDest, executable: false)
+            written.append("config/lan-hosts.conf.example")
+
+            // config/lan-hosts.conf -- the REAL, user-owned hosts file.
+            // Created from the example ONLY if it does not already exist.
+            // Never overwritten once present, even if its bytes differ from
+            // the (possibly updated) example (dns-config-c4r).
+            let realDest = installed.appendingPathComponent("config/lan-hosts.conf")
+            if !fm.fileExists(atPath: realDest.path) {
+                try atomicCopy(sourceFile: lanHostsExampleSrc, destFile: realDest, executable: false)
+                written.append("config/lan-hosts.conf")
+            }
         }
 
         // Stamp file, from the bundled VERSION contents (trimmed).

@@ -1,6 +1,6 @@
 #!/bin/bash
-# lan-hosts.sh -- sourceable helpers for reading config/lan-hosts.conf, the
-# single source of truth for LAN host addresses (ADR-003, dns-config-j9y.3).
+# lan-hosts.sh -- sourceable helpers for reading lan-hosts.conf, the single
+# source of truth for LAN host addresses (ADR-003, dns-config-j9y.3).
 #
 # Usage:
 #   source lib/lan-hosts.sh
@@ -13,23 +13,31 @@
 # resolves LAN_HOSTS_CONF (see below). It performs no mutation and issues no
 # external calls at source time.
 #
-# Path resolution (case-guard repo-root pattern, matching lib/tailscale-ctl.sh
-# and friends): LAN_HOSTS_CONF defaults to "<repo root>/config/lan-hosts.conf"
-# where "repo root" is resolved relative to this file's own location. This is
-# OVERRIDABLE via the LAN_HOSTS_CONF environment variable, which
-# bin/lan-dns-install.sh's installed copy under
-# "$HOME/Library/Application Support/vpn-switch/lib/lan-hosts.sh" is expected
-# to rely on if it is ever installed standalone away from the repo checkout
-# -- callers that want a specific conf file (e.g. a copy already generated
-# elsewhere) can set LAN_HOSTS_CONF before sourcing this file, or at call
-# time, and it takes precedence over the repo-relative default.
+# Path resolution (dns-config-c4r): LAN_HOSTS_CONF is resolved, in order:
+#   1. The LAN_HOSTS_CONF environment variable, if already set -- takes
+#      precedence over everything below, so callers wanting a specific conf
+#      file (e.g. a copy already generated elsewhere) can set it before
+#      sourcing this file, or at call time.
+#   2. "<repo root>/config/lan-hosts.conf" (repo root resolved relative to
+#      this file's own location, the case-guard repo-root pattern also used
+#      by lib/tailscale-ctl.sh and friends) -- used IF that file is readable.
+#      This is the REAL, user-owned hosts file for a repo checkout; it is
+#      gitignored and never shipped (see config/lan-hosts.conf.example).
+#   3. "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf"
+#      -- used IF that file is readable and (2) was not. This is where
+#      bin/install-vpn-switch.sh and ScriptBundle.swift create/maintain the
+#      real, user-owned hosts file for an installed (non-checkout) copy of
+#      this script.
+#   If neither (2) nor (3) is readable, LAN_HOSTS_CONF is left pointing at
+#   candidate (2) so callers' "unreadable"/missing-file error messages stay
+#   meaningful (they name a real, expected path rather than an empty string).
 #
-# File format (config/lan-hosts.conf): hosts-style,
-# "<name> <lan-ip> <tailnet-ip>" per line. '#' starts a comment (whole-line
-# or trailing); blank lines are ignored. The third column (tailnet IP) is a
-# fallback value only -- callers wanting the LIVE tailnet address should
-# prefer 'tailscale status --json' (see lib/lan-dns.sh's lan_dns_render) and
-# fall back to this column only when no live peer entry is found.
+# File format (lan-hosts.conf): hosts-style, "<name> <lan-ip> <tailnet-ip>"
+# per line. '#' starts a comment (whole-line or trailing); blank lines are
+# ignored. The third column (tailnet IP) is a fallback value only -- callers
+# wanting the LIVE tailnet address should prefer 'tailscale status --json'
+# (see lib/lan-dns.sh's lan_dns_render) and fall back to this column only
+# when no live peer entry is found.
 #
 # Repo conventions: set -u, no set -e (probe functions return empty/nonzero
 # on missing data rather than aborting a sourcing caller). Bash 3.2
@@ -44,11 +52,22 @@ if [ -z "${LAN_HOSTS_CONF:-}" ]; then
         *)   _LAN_HOSTS_SH_PARENT="." ;;
     esac
     if _LAN_HOSTS_SH_DIR="$(cd "${_LAN_HOSTS_SH_PARENT}" 2>/dev/null && pwd)"; then
-        LAN_HOSTS_CONF="${_LAN_HOSTS_SH_DIR}/../config/lan-hosts.conf"
+        _LAN_HOSTS_SH_REPO_CANDIDATE="${_LAN_HOSTS_SH_DIR}/../config/lan-hosts.conf"
     else
-        LAN_HOSTS_CONF="./config/lan-hosts.conf"
+        _LAN_HOSTS_SH_REPO_CANDIDATE="./config/lan-hosts.conf"
     fi
+    _LAN_HOSTS_SH_SUPPORT_CANDIDATE="${HOME}/Library/Application Support/vpn-switch/config/lan-hosts.conf"
+
+    if [ -r "${_LAN_HOSTS_SH_REPO_CANDIDATE}" ]; then
+        LAN_HOSTS_CONF="${_LAN_HOSTS_SH_REPO_CANDIDATE}"
+    elif [ -r "${_LAN_HOSTS_SH_SUPPORT_CANDIDATE}" ]; then
+        LAN_HOSTS_CONF="${_LAN_HOSTS_SH_SUPPORT_CANDIDATE}"
+    else
+        LAN_HOSTS_CONF="${_LAN_HOSTS_SH_REPO_CANDIDATE}"
+    fi
+
     unset _LAN_HOSTS_SH_SOURCE _LAN_HOSTS_SH_PARENT _LAN_HOSTS_SH_DIR
+    unset _LAN_HOSTS_SH_REPO_CANDIDATE _LAN_HOSTS_SH_SUPPORT_CANDIDATE
 fi
 
 # lan_hosts_lan_ip <name> -- print the LAN IP (column 2) for <name> from

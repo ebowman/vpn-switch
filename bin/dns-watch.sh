@@ -36,6 +36,32 @@ else
     NORD_DETECT_AVAILABLE=0
 fi
 
+# Load lib/lan-hosts.sh so the polled host/addresses below are derived from
+# the configured lan-hosts.conf rather than hardcoded (dns-config-c4r).
+LAN_HOSTS_LIB="$REPO_ROOT/lib/lan-hosts.sh"
+if [ -f "$LAN_HOSTS_LIB" ]; then
+    # shellcheck source=lib/lan-hosts.sh
+    . "$LAN_HOSTS_LIB"
+    LAN_HOSTS_AVAILABLE=1
+else
+    LAN_HOSTS_AVAILABLE=0
+fi
+
+# The first configured host name and its fallback tailnet/LAN IPs -- the
+# columns this poller has always reported on. Empty if lan-hosts.conf is
+# unavailable; the sample() function below degrades to "n/a" for that host's
+# columns rather than aborting the poll.
+WATCH_HOST=""
+WATCH_HOST_TAILNET_IP=""
+WATCH_HOST_LAN_IP=""
+if [ "$LAN_HOSTS_AVAILABLE" -eq 1 ]; then
+    WATCH_HOST="$(lan_hosts_names | head -1)"
+    if [ -n "$WATCH_HOST" ]; then
+        WATCH_HOST_TAILNET_IP="$(lan_hosts_tailnet_ip "$WATCH_HOST")"
+        WATCH_HOST_LAN_IP="$(lan_hosts_lan_ip "$WATCH_HOST")"
+    fi
+fi
+
 LABEL="${1:-watch}"
 DURATION="${2:-120}"
 OUTDIR="$REPO_ROOT/snapshots"
@@ -88,15 +114,27 @@ sample() {
     dns_gen="$(timeout 5 dscacheutil -q host -a name apple.com 2>/dev/null | awk '/ip_address/{print $2; exit}')"
     [ -n "$dns_gen" ] || dns_gen="FAIL"
 
-    dns_streamy="$(timeout 5 dscacheutil -q host -a name streamy 2>/dev/null | awk '/ip_address/{print $2; exit}')"
+    if [ -n "$WATCH_HOST" ]; then
+        dns_streamy="$(timeout 5 dscacheutil -q host -a name "$WATCH_HOST" 2>/dev/null | awk '/ip_address/{print $2; exit}')"
+    else
+        dns_streamy=""
+    fi
     [ -n "$dns_streamy" ] || dns_streamy="FAIL"
 
-    if timeout 3 ping -c1 -W1000 100.64.10.4 >/dev/null 2>&1; then ping_streamy="ok"; else ping_streamy="FAIL"; fi
+    if [ -n "$WATCH_HOST_TAILNET_IP" ] && timeout 3 ping -c1 -W1000 "$WATCH_HOST_TAILNET_IP" >/dev/null 2>&1; then
+        ping_streamy="ok"
+    else
+        ping_streamy="FAIL"
+    fi
 
     # Reaching the LAN address bypasses both the tailnet and any resolver, so
     # it separates "DNS is broken" from "the network path is gone".
     local ping_lan web
-    if timeout 3 ping -c1 -W1000 192.0.2.4 >/dev/null 2>&1; then ping_lan="ok"; else ping_lan="FAIL"; fi
+    if [ -n "$WATCH_HOST_LAN_IP" ] && timeout 3 ping -c1 -W1000 "$WATCH_HOST_LAN_IP" >/dev/null 2>&1; then
+        ping_lan="ok"
+    else
+        ping_lan="FAIL"
+    fi
 
     # DNS resolving and ICMP working do NOT mean the machine is usable — with
     # Nord up the browser fails while both of those still report green. Only a

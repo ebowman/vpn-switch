@@ -112,7 +112,7 @@ struct ScriptBundleTests {
     // MARK: - sync(from:to:)
 
     /// Builds a fabricated "bundled" tree at `root`:
-    ///   bin/vpn-ctl.sh, lib/a.sh, lib/b.sh, config/lan-hosts.conf, VERSION
+    ///   bin/vpn-ctl.sh, lib/a.sh, lib/b.sh, config/lan-hosts.conf.example, VERSION
     private func makeBundledTree(at root: URL, version: String = "9.9+9") throws {
         let fm = FileManager.default
         try fm.createDirectory(at: root.appendingPathComponent("bin"), withIntermediateDirectories: true)
@@ -129,7 +129,7 @@ struct ScriptBundleTests {
             to: root.appendingPathComponent("lib/b.sh"), atomically: true, encoding: .utf8
         )
         try "127.0.0.1 example.lan\n".write(
-            to: root.appendingPathComponent("config/lan-hosts.conf"), atomically: true, encoding: .utf8
+            to: root.appendingPathComponent("config/lan-hosts.conf.example"), atomically: true, encoding: .utf8
         )
         try "\(version)\n".write(to: root.appendingPathComponent("VERSION"), atomically: true, encoding: .utf8)
     }
@@ -153,19 +153,90 @@ struct ScriptBundleTests {
         let written = try ScriptBundle.sync(from: bundled, to: installed)
 
         #expect(Set(written) == Set([
-            "bin/vpn-ctl.sh", "lib/a.sh", "lib/b.sh", "config/lan-hosts.conf", ScriptBundle.stampFileName,
+            "bin/vpn-ctl.sh", "lib/a.sh", "lib/b.sh",
+            "config/lan-hosts.conf.example", "config/lan-hosts.conf",
+            ScriptBundle.stampFileName,
         ]))
 
         let fm = FileManager.default
         #expect(fm.fileExists(atPath: installed.appendingPathComponent("bin/vpn-ctl.sh").path))
         #expect(fm.fileExists(atPath: installed.appendingPathComponent("lib/a.sh").path))
         #expect(fm.fileExists(atPath: installed.appendingPathComponent("lib/b.sh").path))
+        #expect(fm.fileExists(atPath: installed.appendingPathComponent("config/lan-hosts.conf.example").path))
         #expect(fm.fileExists(atPath: installed.appendingPathComponent("config/lan-hosts.conf").path))
+
+        // Fresh install: both files are created with identical content.
+        let exampleContents = try Data(
+            contentsOf: installed.appendingPathComponent("config/lan-hosts.conf.example")
+        )
+        let realContents = try Data(contentsOf: installed.appendingPathComponent("config/lan-hosts.conf"))
+        #expect(exampleContents == realContents)
 
         let stamp = try String(
             contentsOf: installed.appendingPathComponent(ScriptBundle.stampFileName), encoding: .utf8
         )
         #expect(stamp.trimmingCharacters(in: .whitespacesAndNewlines) == "9.9+9")
+    }
+
+    // MARK: - real lan-hosts.conf is user-owned (dns-config-c4r)
+
+    @Test func preexistingLanHostsConfSurvivesSyncUnchangedWhileExampleIsRefreshed() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let bundled = base.appendingPathComponent("bundled")
+        let installed = base.appendingPathComponent("installed")
+        try makeBundledTree(at: bundled, version: "9.9+9")
+        try FileManager.default.createDirectory(
+            at: installed.appendingPathComponent("config"), withIntermediateDirectories: true
+        )
+
+        let realContentBefore = "realhost 10.0.0.9 100.99.99.99\n"
+        try realContentBefore.write(
+            to: installed.appendingPathComponent("config/lan-hosts.conf"), atomically: true, encoding: .utf8
+        )
+
+        let written = try ScriptBundle.sync(from: bundled, to: installed)
+
+        // config/lan-hosts.conf was NOT (re-)written since it already existed.
+        #expect(!written.contains("config/lan-hosts.conf"))
+        #expect(written.contains("config/lan-hosts.conf.example"))
+
+        let realContentAfter = try String(
+            contentsOf: installed.appendingPathComponent("config/lan-hosts.conf"), encoding: .utf8
+        )
+        #expect(realContentAfter == realContentBefore)
+
+        let exampleContentAfter = try String(
+            contentsOf: installed.appendingPathComponent("config/lan-hosts.conf.example"), encoding: .utf8
+        )
+        #expect(exampleContentAfter == "127.0.0.1 example.lan\n")
+    }
+
+    @Test func modifiedInstalledExampleTriggersContentsDifferButModifiedRealConfDoesNot() throws {
+        let base = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let bundled = base.appendingPathComponent("bundled")
+        let installed = base.appendingPathComponent("installed")
+        try makeBundledTree(at: bundled, version: "9.9+9")
+        try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
+        _ = try ScriptBundle.sync(from: bundled, to: installed)
+
+        #expect(ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed) == true)
+
+        // Modifying the installed REAL lan-hosts.conf must NOT be treated as
+        // "contents differ" -- it is user data and is never compared.
+        try "tampered-real 10.0.0.1 100.0.0.1\n".write(
+            to: installed.appendingPathComponent("config/lan-hosts.conf"), atomically: true, encoding: .utf8
+        )
+        #expect(ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed) == true)
+
+        // Modifying the installed EXAMPLE must be detected as "contents differ".
+        try "tampered-example 10.0.0.2 100.0.0.2\n".write(
+            to: installed.appendingPathComponent("config/lan-hosts.conf.example"), atomically: true, encoding: .utf8
+        )
+        #expect(ScriptBundle.installedContentMatches(bundleDir: bundled, installDir: installed) == false)
     }
 
     @Test func syncedShellFilesAreExecutable() throws {

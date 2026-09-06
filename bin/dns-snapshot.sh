@@ -34,6 +34,45 @@ else
     NORD_DETECT_AVAILABLE=0
 fi
 
+# Load lib/lan-hosts.sh so the probed host names/addresses below are derived
+# from the configured lan-hosts.conf rather than hardcoded (dns-config-c4r).
+# Degrade to an empty host list if unavailable/unreadable -- the resolution
+# and reachability sections below just print nothing for those probes.
+LAN_HOSTS_LIB="${REPO_ROOT}/lib/lan-hosts.sh"
+if [ -f "${LAN_HOSTS_LIB}" ]; then
+    # shellcheck source=lib/lan-hosts.sh
+    . "${LAN_HOSTS_LIB}"
+    LAN_HOSTS_AVAILABLE=1
+else
+    LAN_HOSTS_AVAILABLE=0
+fi
+
+# The tailnet's MagicDNS suffix (e.g. "tailXXXX.ts.net"), derived from a live
+# 'tailscale status --json' rather than hardcoded. Empty if unavailable --
+# callers must SKIP any FQDN-suffixed probe rather than guessing.
+TAILNET_SUFFIX=""
+detect_tailnet_suffix() {
+    # Deliberately absolute, no PATH fallback (matches lib/tailscale-ctl.sh's
+    # TS_CTL_BIN convention).
+    local ts_bin="/usr/local/bin/tailscale"
+    [ -x "${ts_bin}" ] || return 1
+    local json
+    json="$("${ts_bin}" status --json 2>/dev/null)" || return 1
+    [ -n "${json}" ] || return 1
+    if command -v /usr/bin/python3 >/dev/null 2>&1; then
+        TAILNET_SUFFIX="$(printf '%s' "${json}" | /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("MagicDNSSuffix", "") or "")
+except Exception:
+    pass
+' 2>/dev/null)"
+    fi
+    [ -n "${TAILNET_SUFFIX}" ]
+}
+detect_tailnet_suffix || TAILNET_SUFFIX=""
+
 SNAPSHOT_DIR="${REPO_ROOT}/snapshots"
 OUTFILE="${SNAPSHOT_DIR}/${LABEL}.txt"
 SNAPSHOT_WRITE_OK=1
@@ -137,18 +176,38 @@ build_report() {
     echo
 
     echo "=== resolution ==="
-    resolve_host "streamy"
-    resolve_host "streamy.local"
-    resolve_host "streamy.tailXXXX.ts.net"
-    resolve_host "mac-mini"
-    resolve_host "mac-mini.local"
-    resolve_host "mac-mini.tailXXXX.ts.net"
+    if [ "${LAN_HOSTS_AVAILABLE}" -eq 1 ]; then
+        local _host
+        while IFS= read -r _host; do
+            [ -n "${_host}" ] || continue
+            resolve_host "${_host}"
+            resolve_host "${_host}.local"
+            if [ -n "${TAILNET_SUFFIX}" ]; then
+                resolve_host "${_host}.${TAILNET_SUFFIX}"
+            else
+                echo "${_host}.<tailnet-suffix>:"
+                echo "(SKIP: tailnet MagicDNS suffix unavailable -- 'tailscale status --json' unreachable/not found)"
+            fi
+        done < <(lan_hosts_names | head -2)
+    else
+        echo "(SKIP: lib/lan-hosts.sh unavailable -- cannot derive configured host names)"
+    fi
     echo
 
     echo "=== reachability ==="
-    check_reachability "100.64.10.4"
-    check_reachability "100.64.10.65"
-    check_reachability "192.0.2.4"
+    if [ "${LAN_HOSTS_AVAILABLE}" -eq 1 ]; then
+        local _host
+        while IFS= read -r _host; do
+            [ -n "${_host}" ] || continue
+            local _tnip _lanip
+            _tnip="$(lan_hosts_tailnet_ip "${_host}")"
+            _lanip="$(lan_hosts_lan_ip "${_host}")"
+            [ -n "${_tnip}" ] && check_reachability "${_tnip}"
+            [ -n "${_lanip}" ] && check_reachability "${_lanip}"
+        done < <(lan_hosts_names | head -2)
+    else
+        echo "(SKIP: lib/lan-hosts.sh unavailable -- cannot derive configured host addresses)"
+    fi
 }
 
 REPORT="$(build_report)"

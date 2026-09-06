@@ -176,8 +176,8 @@ _lan_dns_tailnet_ip_live() {
     # awk-based approach): find the Peer object whose HostName matches
     # (case-insensitively) <name>, then that same object's first
     # TailscaleIPs entry. Self is included too, since a host name could in
-    # principle be this machine's own (not expected for streamy/
-    # mac-mini, but harmless to support).
+    # principle be this machine's own (not expected for the configured
+    # lan-hosts.conf entries, but harmless to support).
     if [ -x /usr/bin/python3 ]; then
         printf '%s' "${json}" | /usr/bin/python3 -c '
 import json, sys

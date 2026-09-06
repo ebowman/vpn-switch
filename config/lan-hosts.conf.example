@@ -1,4 +1,14 @@
-# lan-hosts.conf -- single source of truth for LAN host addresses.
+# lan-hosts.conf.example -- EXAMPLE for lan-hosts.conf, the single source of
+# truth for LAN host addresses. This file is tracked in the repo and ships
+# with placeholder values (RFC 5737 TEST-NET-1 / example tailnet addresses).
+#
+# The REAL, user-owned copy lives at
+# "$HOME/Library/Application Support/vpn-switch/config/lan-hosts.conf" and is
+# never tracked by git (see .gitignore) or overwritten by the app or install
+# scripts once it exists -- see ScriptBundle.swift and
+# bin/install-vpn-switch.sh, which create it from this example ONLY if it is
+# absent. Edit the App Support copy directly to add/change your real hosts;
+# this example is refreshed on every sync/install but your real file is not.
 #
 # hosts-style: "<name> <lan-ip> <tailnet-ip>" per line, one host per line.
 # Comments (#) and blank lines are ignored. Names must be valid DNS labels
@@ -22,7 +32,8 @@
 #   - bin/lan-dns-install.sh (generates the dnsmasq config from this file)
 #   - bin/dns-verify.sh (Tailscale-off expectations, via lib/lan-hosts.sh)
 #
-# To add a host: add a line below, then re-run bin/lan-dns-install.sh.
+# To add a host: edit your real, user-owned lan-hosts.conf (see path above),
+# then re-run bin/lan-dns-install.sh.
 
 streamy 192.0.2.4 100.64.10.4
 mac-mini 192.0.2.65 100.64.10.65
