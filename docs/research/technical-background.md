@@ -1,5 +1,7 @@
 # Technical Background: CGNAT Allocation and macOS Resolver Priority
 
+*Addresses and the tailnet name in this document are documentation placeholders (RFC 5737 192.0.2.0/24 for the LAN, 100.64.10.0/24 inside the CGNAT range for the tailnet, tailXXXX.ts.net); the measurements and their relative values are real.*
+
 - **Bead:** `dns-config-seo.3`
 - **Date:** 2026-08-16
 - **Status:** Desk research. **Nothing in this document was measured on the live

@@ -1,5 +1,7 @@
 # ADR-001: Hostname Resolution Strategy for streamy / mac-mini
 
+*Addresses and the tailnet name in this document are documentation placeholders (RFC 5737 192.0.2.0/24 for the LAN, 100.64.10.0/24 inside the CGNAT range for the tailnet, tailXXXX.ts.net); the measurements and their relative values are real.*
+
 - **Status:** Superseded by ADR-002 (2026-08-16)
 - **Date:** 2026-08-15
 - **Supersedes:** nothing (first ADR in this repo)

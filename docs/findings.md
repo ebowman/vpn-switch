@@ -1,5 +1,7 @@
 # Findings: NordVPN, Tailscale, and the CGNAT DNS collision
 
+*Addresses and the tailnet name in this document are documentation placeholders (RFC 5737 192.0.2.0/24 for the LAN, 100.64.10.0/24 inside the CGNAT range for the tailnet, tailXXXX.ts.net); the measurements and their relative values are real.*
+
 This is the deliverable of dns-config-seo.4: the full account of a weekend
 (2026-08-15 to 2026-08-16) spent diagnosing why bare hostnames (`streamy`,
 `mac-mini`) and, more seriously, the entire network sometimes stopped

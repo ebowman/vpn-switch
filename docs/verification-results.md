@@ -1,5 +1,7 @@
 # Verification matrix — IKEv2 era (beads dns-config-c15.6, c15.2, qsk.8)
 
+*Addresses and the tailnet name in this document are documentation placeholders (RFC 5737 192.0.2.0/24 for the LAN, 100.64.10.0/24 inside the CGNAT range for the tailnet, tailXXXX.ts.net); the measurements and their relative values are real.*
+
 Date: 2026-08-16. Home LAN (en0 192.0.2.64). Tailscale 1.102.2 standalone.
 NordVPN via the IKEv2 profile (`de1545.nordvpn.com`). NordVPN **app** tunnel
 never connected during any row below. Judged against ADR-002: with
