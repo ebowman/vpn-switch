@@ -370,6 +370,48 @@ defaults write ie.boboco.vpnswitch updateCheckIntervalSeconds -int 60
 
 Relaunch VPN Switch for the new interval to take effect.
 
+### Keeping a VPN connected
+
+Turning **NordVPN** or **Tailscale** on from the VPN Switch menu (or via
+**Turn All VPNs On**) does two things: it connects the VPN, and it records
+that you want it to *stay* connected. From then on VPN Switch watches for
+that VPN dropping and reconnects it automatically — see
+[ADR-004](adr-004-desired-state-reconciliation.md) for the full design.
+This intent is set **only** by turning a VPN on inside VPN Switch, and
+cleared **only** by turning it off inside VPN Switch (the toggle or **Turn
+All VPNs Off**); it persists across relaunch and reboot.
+
+**This is one-directional.** VPN Switch never forces a VPN *down* — turning
+Tailscale off from its own menu bar app and back on again is never fought.
+But turning a VPN off anywhere *other than* VPN Switch (System Settings, or
+the Tailscale menu bar app) while VPN Switch still considers it "kept on"
+will be reverted, typically within one poll interval (5 s by default) plus
+about 3 s to connect. If you want a VPN to actually stay off, turn it off
+in VPN Switch.
+
+**How to tell it's happening:**
+
+- A kept-on VPN's status line in the menu gets a `· kept on` suffix.
+- While reconnecting, the menu header shows `Reconnecting NordVPN… (attempt
+  N)` or, once backed off, `Reconnecting NordVPN… next try in Ns`.
+- A local notification appears once a drop is fixed: "NordVPN dropped and
+  was reconnected by VPN Switch".
+
+**Master toggle.** **Keep VPNs connected** in the menu (default on) pauses
+all reconnect enforcement without discarding any VPN's kept-on intent —
+turn it back on and any VPN still marked kept-on resumes being watched.
+
+**Stopping enforcement for one VPN:** turn that VPN off inside VPN Switch
+(toggle it, or use **Turn All VPNs Off**). **Stopping it for both:** untick
+**Keep VPNs connected**.
+
+**Reconnect paused.** If `vpn-ctl.sh` keeps failing for a reason enforcement
+can't fix by retrying, VPN Switch stops trying and shows `NordVPN reconnect
+paused: <reason>` in the header, plus a notification: "VPN Switch stopped
+reconnecting NordVPN: `<reason>`". See Section 6 for the four reasons and
+their fixes. A paused VPN resumes being watched once you toggle it off then
+on in VPN Switch, or relaunch the app.
+
 ## 5. Verifying
 
 ```
@@ -463,6 +505,8 @@ above without a live environment. **Warning:** the bare `--selftest` flag
 | Bare name gives the previous answer for a few seconds after toggling Tailscale from its own menu | Resolver cache until the app/vpn-ctl re-syncs dnsmasq's hosts file (`dns-config-qsk.12`) | `bash bin/vpn-ctl.sh lan-dns sync` |
 | Bare name fails with Tailscale off at home | dnsmasq not answering, or the search suffix isn't reaching the resolver | `bash bin/vpn-ctl.sh lan-dns status` (if not `answering`, run `bash bin/lan-dns-install.sh`); check `/etc/resolver/home.arpa` exists; check `scutil <<<'show State:/Network/Global/DNS'` — `SearchDomains` should contain `home.arpa` (if Nord IKEv2 is up and it doesn't, the profile predates the DNS block — regenerate with `bin/nord-ikev2-profile.sh` and reinstall) |
 | Bare name takes ~5 s / no answer with both VPNs off, but `.home.arpa` is instant | `local` in the Wi-Fi search list (ahead of `home.arpa`) — bare names try `.local` mDNS first and wait ~5 s before falling through | `sudo networksetup -setsearchdomains "Wi-Fi" home.arpa` |
+| VPN keeps turning itself back on after you turn it off in System Settings or the Tailscale menu | VPN Switch still considers it "kept on" (ADR-004) — the intent is only cleared by turning it off *inside* VPN Switch | Turn the VPN off from the VPN Switch menu (or **Turn All VPNs Off**) instead |
+| Menu header shows "`<name>` reconnect paused: `<reason>`" and the VPN stays down | Reconnect enforcement suspended after a `vpn-ctl.sh` failure it can't fix by retrying | `Tailscale needs login` → open Tailscale and log in; `Shortcut missing` → create the two Shortcuts (Section 3(c)); `NordVPN app tunnel detected` → disconnect the NordVPN app's own tunnel; `vpn-ctl.sh missing` → reinstall (`bash bin/install-vpn-switch.sh`). Then toggle that VPN off then on in VPN Switch (or relaunch) to resume |
 
 ## 7. Tradeoffs and known limitations
 
@@ -473,7 +517,11 @@ above without a live environment. **Warning:** the bare `--selftest` flag
 - **No Threat Protection.** The app's DNS-based malware/ad/tracker blocking
   does not apply to a bare IKEv2 tunnel.
 - **No kill switch.** A dropped IKEv2 tunnel fails open, unlike the app's
-  always-on kill switch.
+  always-on kill switch — but VPN Switch reconnects a dropped tunnel it was
+  asked to keep on (typically within one poll interval (5 s by default)
+  plus about 3 s to connect); see
+  [ADR-004](adr-004-desired-state-reconciliation.md) and "Keeping a VPN
+  connected" (Section 4).
 - **One pinned server** (`de1545.nordvpn.com`). No auto server selection;
   rotating servers means regenerating the profile by hand.
 - **Plaintext service password** in the generated `.mobileconfig`, mode 600,
@@ -581,7 +629,9 @@ nothing else on the machine uses it. If you also want to remove the
   `tailscale-ctl.sh`, `lan-dns.sh` (dnsmasq LaunchAgent status/sync),
   `lan-hosts.sh` (resolves and renders `lan-hosts.conf`, your real,
   user-owned hosts file, into dnsmasq's hosts file).
-- `app/` — the VPN Switch SwiftUI menu bar app (`app/VPNSwitch/`).
+- `app/` — the VPN Switch SwiftUI menu bar app (`app/VPNSwitch/`), including
+  `Reconciler.swift` (pure keep-connected policy: backoff and suspension
+  rules for automatic reconnection, ADR-004).
 - `config/lan-hosts.conf.example` — shipped template for `lan-hosts.conf`
   (LAN/tailnet addresses for the LAN DNS fallback, ADR-003; one line per
   host). Your real, user-owned `lan-hosts.conf` lives at

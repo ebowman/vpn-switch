@@ -26,7 +26,9 @@ two coexist. **VPN Switch**, a menu bar app, gives
 independent on/off control of each VPN, plus "Turn All VPNs On" and "Turn
 All VPNs Off" items (`vpn-ctl.sh all on|off` on the CLI) to bring both up
 or down at once; the menu stays responsive throughout — clicks made while
-a switch is running are queued and run in order. VPN Switch checks GitHub
+a switch is running are queued and run in order. VPN Switch keeps a VPN
+connected once you turn it on here, reconnecting automatically if it drops
+(see [ADR-004](docs/adr-004-desired-state-reconciliation.md)). VPN Switch checks GitHub
 automatically for newer releases and, once you approve, installs a
 signed, Apple-notarized update in place — see
 [docs/runbook.md](docs/runbook.md#updating). A local dnsmasq resolver
@@ -98,7 +100,9 @@ CI runs both plus a shell syntax check on every push/PR. Release process:
   intervals, zero web failures), and IKEv2 throughput of 216/200/194 Mbit/s.
 - Never measured: away/hotspot networks, sleep/wake cycles, and recovery
   after the NordVPN app's own tunnel is connected by mistake.
-- No kill switch — a dropped IKEv2 tunnel fails open, unlike the app.
+- No kill switch — traffic fails open while a tunnel is down, but VPN
+  Switch reconnects a dropped tunnel it was asked to keep on (typically
+  within one poll interval (5 s by default) plus about 3 s to connect).
 - No Threat Protection — the app's DNS-based blocking does not apply to a
   bare IKEv2 tunnel.
 - One pinned NordVPN server. Rotating servers means regenerating the
@@ -120,6 +124,8 @@ CI runs both plus a shell syntax check on every push/PR. Release process:
   decision to run NordVPN over IKEv2.
 - [docs/adr-003-lan-fallback.md](docs/adr-003-lan-fallback.md) — the
   decision behind the LAN DNS fallback.
+- [docs/adr-004-desired-state-reconciliation.md](docs/adr-004-desired-state-reconciliation.md)
+  — the decision behind automatic reconnection.
 - [docs/verification-results.md](docs/verification-results.md) — the full
   measurement matrix.
 - [docs/research/](docs/research/) — background on the CGNAT collision and
