@@ -212,4 +212,37 @@ struct ReconcilerTests {
         let status = VPNStatus.parse("nord=down ts=Running web=ok streamy=ok")
         #expect(r.actions(observing: status, now: Date()) == [.nord])
     }
+
+    /// (R) Mirrors SelfTest.runQueueCasesAndExit()'s "R reconcile" case:
+    /// Reconciler.actions(observing:now:) results driven through
+    /// ActionQueueTestHarness end to end. keepConnected={nord}, status
+    /// nord=down ts=Running -> first actions() call proposes nord, which
+    /// drains to ["nord on"]; after a simulated exit-1 failure, a second
+    /// actions() call within the 10s backoff window proposes nothing, so
+    /// draining leaves the log unchanged; a third call once backoff has
+    /// elapsed proposes nord again, appending a second "nord on".
+    @Test func reconcileActionsDriveActionQueueEndToEnd() async {
+        let h = ActionQueueTestHarness(status: VPNStatus.parse("nord=down ts=Running web=ok streamy=fail"))
+        let r = Reconciler(keepConnected: [.nord])
+        let t0 = Date()
+
+        for target in r.actions(observing: h.status, now: t0) {
+            h.queue.enqueue(target, .on)
+        }
+        await h.queue.drain()
+        #expect(h.log == ["nord on"])
+
+        r.record(.failed(exitCode: 1), for: .nord, now: t0)
+        for target in r.actions(observing: h.status, now: t0.addingTimeInterval(1)) {
+            h.queue.enqueue(target, .on)
+        }
+        await h.queue.drain()
+        #expect(h.log == ["nord on"])
+
+        for target in r.actions(observing: h.status, now: t0.addingTimeInterval(10)) {
+            h.queue.enqueue(target, .on)
+        }
+        await h.queue.drain()
+        #expect(h.log == ["nord on", "nord on"])
+    }
 }

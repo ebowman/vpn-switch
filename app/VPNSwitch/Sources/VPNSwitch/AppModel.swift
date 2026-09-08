@@ -69,6 +69,7 @@ final class AppModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(keepVPNsConnected, forKey: Self.reconcileEnabledKey)
             reconciler.enabled = keepVPNsConnected
+            publishReconcileState()
         }
     }
     /// The targets the user has asked to be kept connected, mirrored from
@@ -76,6 +77,11 @@ final class AppModel: ObservableObject {
     /// menu (dns-config-l40.4) can observe it without reaching into the
     /// reconciler directly.
     @Published private(set) var keptConnected: Set<VPNTarget> = []
+    /// Per-target reconcile status derived from `reconciler.keepConnected`/
+    /// `reconciler.state(for:)` for the menu header (dns-config-l40.3/T4).
+    /// Absent key = idle (nothing to show for that target). Rebuilt by
+    /// `publishReconcileState()` after every reconciler mutation.
+    @Published private(set) var reconcileActivity: [VPNTarget: ReconcileActivity] = [:]
     /// A newer version discovered by the background check (or by a manual
     /// "Check for Updates…" -- see note on `checkForUpdates()`), not yet
     /// dismissed via "Skip This Version" and not equal to a previously
@@ -132,6 +138,15 @@ final class AppModel: ObservableObject {
     /// verification/logging (dns-config-qsk.12 DONE criteria: "verify with
     /// a counter/log").
     private(set) var lanDNSSyncCount = 0
+
+    /// Targets for which `consultReconciler()` has enqueued a reconcile-
+    /// initiated `.on` command that has not yet had its outcome recorded via
+    /// `reconciler.record(...)` in `perform(_:)`. Used to distinguish a
+    /// reconcile-driven `.set(target, .on)`/`.setAll(.on)` from a plain
+    /// user-initiated one so only the former feeds back into the reconciler.
+    /// Cleared per-target once recorded, and wholesale by
+    /// `prepareForTermination()`.
+    private var reconcileInitiated: Set<VPNTarget> = []
 
     /// The keep-connected policy engine (dns-config-l40). Unlike `queue`
     /// below, its initializer takes no self-capturing closures, so it can be
@@ -223,6 +238,15 @@ final class AppModel: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
+                    // Reset reconcile backoff before the forced poll
+                    // (dns-config-l40.3 step 6) so a target that was still
+                    // waiting out a backoff window when the Mac slept
+                    // becomes immediately eligible again and the post-wake
+                    // observation below can act on it right away, rather
+                    // than waiting out a backoff timer computed against
+                    // pre-sleep wall-clock time.
+                    self?.reconciler.resetBackoff()
+                    self?.publishReconcileState()
                     await self?.pollTick(force: true)
                     // Force a resync regardless of whether the wake-time
                     // poll observed a ts transition: Tailscale may have
@@ -346,6 +370,34 @@ final class AppModel: ObservableObject {
         reconciler.setKeepConnected(target, state == .on)
         UserDefaults.standard.set(Reconciler.encode(reconciler.keepConnected), forKey: Self.keepConnectedKey)
         keptConnected = reconciler.keepConnected
+        publishReconcileState()
+    }
+
+    /// Rebuilds `reconcileActivity` from `reconciler.keepConnected`/
+    /// `reconciler.state(for:)` (dns-config-l40.3): a kept-connected target
+    /// with a suspension is `.paused`; a kept-connected target with
+    /// `attempts > 0` and the last observed status not-on is `.reconnecting`;
+    /// a target with a reconcile-initiated command in flight
+    /// (`reconcileInitiated`) is also `.reconnecting`, with `attempt` bumped
+    /// by one over the recorded attempt count so "Reconnecting (attempt 1)"
+    /// shows while the very first attempt is still running (before any
+    /// `record(...)` call has incremented `attempts`). Any other combination
+    /// (not kept-connected, or kept-connected and currently observed up)
+    /// gets no entry -- idle.
+    private func publishReconcileState() {
+        var next: [VPNTarget: ReconcileActivity] = [:]
+        for target in VPNTarget.allCases {
+            guard reconciler.keepConnected.contains(target) else { continue }
+            let state = reconciler.state(for: target)
+            if let suspension = state.suspension {
+                next[target] = .paused(suspension)
+            } else if reconcileInitiated.contains(target) {
+                next[target] = .reconnecting(attempt: state.attempts + 1)
+            } else if state.attempts > 0 {
+                next[target] = .reconnecting(attempt: state.attempts)
+            }
+        }
+        reconcileActivity = next
     }
 
     /// Discards any not-yet-started queued intents (pending target states
@@ -373,6 +425,10 @@ final class AppModel: ObservableObject {
         stopPolling()
         discardPendingActions()
         VPNCtl.terminateAllInFlight()
+        // dns-config-l40.3 step 7: only reconcileInitiated bookkeeping is
+        // cleared here -- keep-connected intent itself persists by design
+        // (it's what makes the app resume enforcing on the next launch).
+        reconcileInitiated.removeAll()
     }
 
     /// Entry point for the "Check for Updates…" menu item. Routed as a
@@ -522,6 +578,13 @@ final class AppModel: ObservableObject {
                 actionDescription: args.joined(separator: " "),
                 timeout: timeout
             )
+            // Feed the outcome back into the reconciler for every target
+            // this command was reconcile-initiated for (dns-config-l40.3
+            // step 3), before the trailing status re-run below -- `.set(_,
+            // .off)` and `.status` never reach here, and a plain
+            // user-initiated `.set(target, .on)` (target not in
+            // reconcileInitiated) never records either.
+            recordReconcileOutcomesIfNeeded(for: cmd, outcome: outcome)
             let messageToPreserve = failed ? headerMessage : nil
             // Re-run status regardless of outcome, per spec: "re-run status".
             // If the mutation itself failed, preserve its error message in
@@ -534,6 +597,98 @@ final class AppModel: ObservableObject {
                 preserveMessageOnSuccess: messageToPreserve
             )
         }
+    }
+
+    /// Targets a `.set(target, .on)`/`.setAll(.on)` command should feed back
+    /// into the reconciler: `target` itself when it is in `reconcileInitiated`
+    /// for `.set`, or every member of `reconcileInitiated` for `.setAll`
+    /// (dns-config-l40.3 step 3 -- the queue may have merged a user intent
+    /// with a reconcile intent into one `.setAll(.on)`). `.set(_, .off)` and
+    /// `.status` never contribute any targets.
+    private func reconcileTargets(for cmd: VPNCommand) -> [VPNTarget] {
+        switch cmd {
+        case .set(let target, .on):
+            return reconcileInitiated.contains(target) ? [target] : []
+        case .setAll(.on):
+            return VPNTarget.allCases.filter { reconcileInitiated.contains($0) }
+        case .set(_, .off), .setAll(.off), .status:
+            return []
+        }
+    }
+
+    /// Maps `outcome` to a `ReconcileOutcome` and records it against every
+    /// target `reconcileTargets(for:)` returns for `cmd`, posting
+    /// notifications for a newly-recorded success or a newly-entered
+    /// suspension (dns-config-l40.3 steps 3-4), then removes each recorded
+    /// target from `reconcileInitiated` and republishes `reconcileActivity`.
+    private func recordReconcileOutcomesIfNeeded(
+        for cmd: VPNCommand,
+        outcome: Result<VPNCtlResult, VPNCtlError>
+    ) {
+        let targets = reconcileTargets(for: cmd)
+        guard !targets.isEmpty else { return }
+
+        let reconcileOutcome: ReconcileOutcome
+        var messageSuffix: String?
+        switch outcome {
+        case .failure(.scriptNotFound):
+            reconcileOutcome = .scriptMissing
+        case .success(let result):
+            messageSuffix = result.lastMessageLine
+            if result.timedOut {
+                reconcileOutcome = .timedOut
+            } else if result.exitCode == 0 {
+                reconcileOutcome = .success
+            } else {
+                reconcileOutcome = .failed(exitCode: result.exitCode)
+            }
+        }
+
+        let now = Date()
+        for target in targets {
+            let suspensionBefore = reconciler.state(for: target).suspension
+            reconciler.record(reconcileOutcome, for: target, now: now)
+            let suspensionAfter = reconciler.state(for: target).suspension
+
+            if case .success = reconcileOutcome {
+                notifyReconcileSuccess(for: target)
+            } else if let suspensionAfter, suspensionAfter != suspensionBefore {
+                notifyReconcileSuspended(for: target, suspension: suspensionAfter, detail: messageSuffix)
+            }
+
+            reconcileInitiated.remove(target)
+        }
+        publishReconcileState()
+    }
+
+    /// Posts "<name> dropped and was reconnected by VPN Switch" for a
+    /// reconcile attempt recorded as a success (dns-config-l40.3 step 4),
+    /// respecting `notifyOnExternalChanges` the same way
+    /// `notifyIfExternalChange` does. This is intentionally the only
+    /// "reconnected" notification -- the earlier poll that first observed
+    /// the drop already posted its own truthful "changed outside VPN
+    /// Switch" line via `notifyIfExternalChange`, and that is left as-is.
+    private func notifyReconcileSuccess(for target: VPNTarget) {
+        guard notifyOnExternalChanges else { return }
+        postNotification(body: "\(target.displayName) dropped and was reconnected by VPN Switch")
+    }
+
+    /// Posts "VPN Switch stopped reconnecting <name>: <label>" the moment a
+    /// target's suspension transitions from none/different to a new value
+    /// (dns-config-l40.3 step 4) -- once per entry into a suspension, not
+    /// repeated on every subsequent failed attempt while still suspended
+    /// (there are none, since a suspended target is never proposed again by
+    /// `actions(observing:now:)` until the user re-arms it). Appends the
+    /// script's own `lastMessageLine` (e.g. the exit-3 shortcut-creation
+    /// hint) on a new line when present, so the notification body keeps that
+    /// actionable detail even though the header only shows the short label.
+    private func notifyReconcileSuspended(for target: VPNTarget, suspension: ReconcileSuspension, detail: String?) {
+        guard notifyOnExternalChanges else { return }
+        var body = "VPN Switch stopped reconnecting \(target.displayName): \(suspension.label)"
+        if let detail, !detail.isEmpty {
+            body += "\n\(detail)"
+        }
+        postNotification(body: body)
     }
 
     /// Applies a VPNCtlResult/error to published state. Always called on the
@@ -576,6 +731,12 @@ final class AppModel: ObservableObject {
                 failed = true
             } else if let preserved = preserveMessageOnSuccess {
                 headerMessage = preserved
+            } else if let line = currentReconcileHeaderLine() {
+                // A reconcile attempt is in flight/paused for some kept-
+                // connected target: keep showing that rather than clobbering
+                // it to nil just because this particular status/mutation
+                // succeeded (dns-config-l40.3 step 5).
+                headerMessage = line
             } else {
                 headerMessage = nil
             }
@@ -584,7 +745,92 @@ final class AppModel: ObservableObject {
         // Independent of notifyOnExternalChanges -- the resolver must stay
         // truthful even if the user has notifications turned off.
         syncLANDNSIfNeeded(from: previousStatus, to: status, reason: "poll")
+        consultReconciler()
         return failed
+    }
+
+    /// Picks the reconcile header line to show, if any: Nord first, then
+    /// Tailscale (dns-config-l40.3 step 5). `nil` when neither target has a
+    /// `reconcileActivity` entry.
+    private func currentReconcileHeaderLine() -> String? {
+        for target in [VPNTarget.nord, .tailscale] {
+            guard let activity = reconcileActivity[target] else { continue }
+            let nextAttemptAt = reconciler.state(for: target).nextAttemptAt
+            if let line = Self.reconcileHeaderLine(
+                target: target,
+                activity: activity,
+                nextAttemptAt: nextAttemptAt,
+                now: Date()
+            ) {
+                return line
+            }
+        }
+        return nil
+    }
+
+    /// Pure, nonisolated helper (dns-config-l40.3 step 5) computing the
+    /// header line for a single target's reconcile activity:
+    /// - `.reconnecting(n)` with a future `nextAttemptAt` -> "Reconnecting
+    ///   <name>… next try in <seconds>s".
+    /// - `.reconnecting(n)` with a nil or already-past `nextAttemptAt` ->
+    ///   "Reconnecting <name>… (attempt <n>)".
+    /// - `.paused(s)` -> "<name> reconnect paused: <s.label>".
+    static func reconcileHeaderLine(
+        target: VPNTarget,
+        activity: ReconcileActivity,
+        nextAttemptAt: Date?,
+        now: Date
+    ) -> String? {
+        let name = target.displayName
+        switch activity {
+        case .reconnecting(let attempt):
+            if let nextAttemptAt, nextAttemptAt > now {
+                let seconds = Int(ceil(nextAttemptAt.timeIntervalSince(now)))
+                return "Reconnecting \(name)… next try in \(seconds)s"
+            }
+            return "Reconnecting \(name)… (attempt \(attempt))"
+        case .paused(let suspension):
+            return "\(name) reconnect paused: \(suspension.label)"
+        }
+    }
+
+    /// Consults the reconciler for reconnect actions to run, driven from the
+    /// end of every `apply(outcome:...)` call (dns-config-l40.3 step 2) --
+    /// this is the only place reconcile-initiated commands are enqueued.
+    /// Never invoked directly by a timer/Task loop of its own; it is purely
+    /// reactive to status observations that already flow through `apply`.
+    ///
+    /// Guarded so it only proposes anything when: the master toggle is on,
+    /// no toggle/mutation is actively switching, and no queue command is
+    /// currently running -- in particular, this means the trailing status
+    /// re-run inside `perform(_:)` (which also calls `apply` ->
+    /// `consultReconciler()`) is a no-op while `queue.activeCommand` is still
+    /// non-nil for the reconcile-initiated command that triggered it; the
+    /// next timer poll (with the queue idle again) is what re-consults.
+    ///
+    /// Edge case: if the user has just clicked a target off, `setIntent` has
+    /// already removed it from `reconciler.keepConnected` before this method
+    /// ever runs, so `reconciler.actions(...)` will not propose it even if
+    /// the same poll still observes it as down.
+    ///
+    /// Edge case: if a reconcile-initiated `.on` is actively running and the
+    /// user clicks the toggle to turn that target off, `queue.enqueue`
+    /// records `.off` as the next intent per ActionQueue's existing
+    /// coalescing rules (last request before the next drain wins); once the
+    /// in-flight `.on` completes and its outcome is recorded, `setIntent`
+    /// has already cleared the keep-connected intent, so the reconciler
+    /// proposes nothing further and the queued `.off` simply runs next.
+    private func consultReconciler() {
+        guard keepVPNsConnected else { return }
+        guard !isSwitching else { return }
+        guard queue.activeCommand == nil else { return }
+        let targets = reconciler.actions(observing: status, now: Date())
+        guard !targets.isEmpty else { return }
+        for target in targets {
+            reconcileInitiated.insert(target)
+            queue.enqueue(target, .on)
+        }
+        publishReconcileState()
     }
 
     /// Posts a local notification when the parsed status changed and this

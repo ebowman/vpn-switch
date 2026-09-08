@@ -298,6 +298,38 @@ enum SelfTest {
                 print("FAIL J mid-run enqueue while suspended: max concurrency expected 1 got \(h.maxInFlight)")
             }
 
+            // R: reconcile -- Reconciler.actions(observing:now:) results
+            // enqueued and drained through the same ActionQueue harness
+            // (dns-config-l40.3 DONE criteria). keepConnected={nord},
+            // status nord=down ts=Running: the first actions() call proposes
+            // nord, which is enqueued and drained to ["nord on"]. Recording
+            // a simulated exit-1 failure starts backoff (10s); a second
+            // actions() call 1s later proposes nothing, so draining again
+            // leaves the log unchanged. A third actions() call 10s later
+            // (backoff elapsed) proposes nord again, appending a second
+            // "nord on".
+            h.reset(status: VPNStatus.parse("nord=down ts=Running web=ok streamy=fail"))
+            let reconciler = Reconciler(keepConnected: [.nord])
+            let t0 = Date()
+            for target in reconciler.actions(observing: h.status, now: t0) {
+                h.queue.enqueue(target, .on)
+            }
+            await h.queue.drain()
+            h.check("R reconcile (first attempt)", expected: ["nord on"])
+
+            reconciler.record(.failed(exitCode: 1), for: .nord, now: t0)
+            for target in reconciler.actions(observing: h.status, now: t0.addingTimeInterval(1)) {
+                h.queue.enqueue(target, .on)
+            }
+            await h.queue.drain()
+            h.check("R reconcile (within backoff, no re-enqueue)", expected: ["nord on"])
+
+            for target in reconciler.actions(observing: h.status, now: t0.addingTimeInterval(10)) {
+                h.queue.enqueue(target, .on)
+            }
+            await h.queue.drain()
+            h.check("R reconcile (backoff elapsed, re-enqueued)", expected: ["nord on", "nord on"])
+
             // queuedLabels eyeball check (before draining).
             h.reset()
             h.queue.enqueue(.nord, .on)

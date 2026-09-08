@@ -29,6 +29,14 @@ enum ReconcileSuspension: Equatable {
     }
 }
 
+/// The reconcile status of a single kept-connected target, as published for
+/// the menu header (dns-config-l40.3/T4). Absent from `AppModel.
+/// reconcileActivity` means idle (nothing to show).
+enum ReconcileActivity: Equatable {
+    case reconnecting(attempt: Int)
+    case paused(ReconcileSuspension)
+}
+
 /// A pure, `@MainActor`, I/O-free policy engine deciding which VPN targets
 /// should be re-enabled given the user's "keep connected" intent, the most
 /// recently observed status, and backoff/suspension state from prior
