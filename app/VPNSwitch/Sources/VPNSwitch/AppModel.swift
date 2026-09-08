@@ -749,6 +749,29 @@ final class AppModel: ObservableObject {
         return failed
     }
 
+    /// All reconcile header lines to show, Nord first then Tailscale
+    /// (dns-config-l40.4 step 2), for rendering below the "Switching:"/
+    /// "Queued:" lines in the menu. Empty when `keepVPNsConnected` is off
+    /// (per step 5, enforcement is paused and intent is not surfaced here)
+    /// or when neither target has a `reconcileActivity` entry.
+    func reconcileHeaderLines(now: Date = Date()) -> [String] {
+        guard keepVPNsConnected else { return [] }
+        var lines: [String] = []
+        for target in [VPNTarget.nord, .tailscale] {
+            guard let activity = reconcileActivity[target] else { continue }
+            let nextAttemptAt = reconciler.state(for: target).nextAttemptAt
+            if let line = Self.reconcileHeaderLine(
+                target: target,
+                activity: activity,
+                nextAttemptAt: nextAttemptAt,
+                now: now
+            ) {
+                lines.append(line)
+            }
+        }
+        return lines
+    }
+
     /// Picks the reconcile header line to show, if any: Nord first, then
     /// Tailscale (dns-config-l40.3 step 5). `nil` when neither target has a
     /// `reconcileActivity` entry.
@@ -825,6 +848,17 @@ final class AppModel: ObservableObject {
         guard !isSwitching else { return }
         guard queue.activeCommand == nil else { return }
         let targets = reconciler.actions(observing: status, now: Date())
+        // Publish unconditionally here, before the empty-targets guard
+        // below (carry-over nit from the l40.3 review). reconciler.actions()
+        // resets a target's attempt state whenever it observes that target
+        // .up/.running, including when the VPN came back on its own outside
+        // this app (e.g. the NordVPN app or Tailscale daemon reconnected
+        // it). That reset happens even though `targets` comes back empty --
+        // there is nothing left to enqueue -- so without this call
+        // `reconcileActivity` would keep showing a stale `.reconnecting`
+        // entry for that target until some unrelated mutation happened to
+        // call `publishReconcileState()` next.
+        publishReconcileState()
         guard !targets.isEmpty else { return }
         for target in targets {
             reconcileInitiated.insert(target)

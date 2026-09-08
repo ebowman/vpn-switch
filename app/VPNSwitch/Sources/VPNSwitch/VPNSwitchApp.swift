@@ -89,6 +89,26 @@ struct MenuContentView: View {
         }
     }
 
+    /// Reconcile header lines to render below Switching/Queued and above
+    /// headerMessage (dns-config-l40.4 step 2). Computed fresh per render
+    /// via `AppModel.reconcileHeaderLines(now:)`.
+    private var reconcileHeaderLines: [String] {
+        model.reconcileHeaderLines()
+    }
+
+    /// " · kept on" suffix appended to the "NordVPN: " status line
+    /// (dns-config-l40.4 step 1) when Nord is in model.keptConnected and
+    /// the master toggle is on; empty string otherwise (step 5).
+    private var nordKeptOnSuffix: String {
+        model.keepVPNsConnected && model.keptConnected.contains(.nord) ? " · kept on" : ""
+    }
+
+    /// " · kept on" suffix appended to the "Tailscale: " status line, same
+    /// gating as `nordKeptOnSuffix` above.
+    private var tailscaleKeptOnSuffix: String {
+        model.keepVPNsConnected && model.keptConnected.contains(.tailscale) ? " · kept on" : ""
+    }
+
     var body: some View {
         Group {
             Group {
@@ -99,7 +119,21 @@ struct MenuContentView: View {
                     if !model.queuedActionLabels.isEmpty {
                         Text("Queued: " + model.queuedActionLabels.joined(separator: ", "))
                     }
-                } else if let message = model.headerMessage {
+                }
+                // Reconcile header lines (dns-config-l40.4 step 2): one per
+                // model.reconcileActivity entry, Nord then Tailscale,
+                // rendered below Switching/Queued and above headerMessage.
+                // Empty (hidden) when keepVPNsConnected is off, per step 5.
+                ForEach(reconcileHeaderLines, id: \.self) { line in
+                    Text(line)
+                }
+                // headerMessage duplicates a reconcile line while a reconcile
+                // attempt is in flight/paused (see AppModel.apply(outcome:)'s
+                // currentReconcileHeaderLine() fallback) -- skip it here so
+                // that line isn't shown twice.
+                if !model.isSwitching, model.scriptMissingPath == nil,
+                    let message = model.headerMessage,
+                    !reconcileHeaderLines.contains(message) {
                     Text(message)
                 }
                 if let update = model.availableUpdate {
@@ -108,11 +142,11 @@ struct MenuContentView: View {
             }
 
             if isAppTunnelError {
-                Text("⚠︎ NordVPN: \(model.status.nord.label)")
+                Text("⚠︎ NordVPN: \(model.status.nord.label)\(nordKeptOnSuffix)")
             } else {
-                Text("NordVPN: \(model.status.nord.label)")
+                Text("NordVPN: \(model.status.nord.label)\(nordKeptOnSuffix)")
             }
-            Text("Tailscale: \(model.status.ts.label)")
+            Text("Tailscale: \(model.status.ts.label)\(tailscaleKeptOnSuffix)")
 
             if isAppTunnelError {
                 Text("NordVPN app tunnel detected — 100.64.0.2 collides with Tailscale; disconnect the NordVPN app and use the IKEv2 profile")
@@ -178,6 +212,8 @@ struct MenuContentView: View {
             }
 
             Group {
+                Toggle("Keep VPNs connected", isOn: $model.keepVPNsConnected)
+                    .help("Reconnect a VPN automatically if it drops after you turned it on here")
                 Toggle("Notify on external changes", isOn: $model.notifyOnExternalChanges)
                 Toggle("Check for updates automatically", isOn: $model.autoUpdateCheckEnabled)
             }
