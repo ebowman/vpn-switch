@@ -170,4 +170,46 @@ struct ReconcilerTests {
         let status = VPNStatus.parse("nord=down ts=Stopped web=ok streamy=fail")
         #expect(r.actions(observing: status, now: Date()) == [.nord, .tailscale])
     }
+
+    /// (k) encode/decode round trip: empty set.
+    @Test func codecRoundTripsEmptySet() {
+        let targets: Set<VPNTarget> = []
+        #expect(Reconciler.decode(Reconciler.encode(targets)) == targets)
+    }
+
+    /// (l) encode/decode round trip: a single target.
+    @Test func codecRoundTripsSingleTarget() {
+        let targets: Set<VPNTarget> = [.nord]
+        #expect(Reconciler.decode(Reconciler.encode(targets)) == targets)
+    }
+
+    /// (m) encode/decode round trip: both targets, and encode is sorted
+    /// ascending ("nord" < "tailscale").
+    @Test func codecRoundTripsBothTargets() {
+        let targets: Set<VPNTarget> = [.nord, .tailscale]
+        #expect(Reconciler.encode(targets) == ["nord", "tailscale"])
+        #expect(Reconciler.decode(Reconciler.encode(targets)) == targets)
+    }
+
+    /// (n) decode ignores unknown names, keeping only recognized ones.
+    @Test func decodeIgnoresUnknownNames() {
+        #expect(Reconciler.decode(["nord", "bogus"]) == [.nord])
+    }
+
+    /// (o) decode maps a nil raw array (key absent from UserDefaults) to
+    /// the empty set.
+    @Test func decodeOfNilIsEmpty() {
+        #expect(Reconciler.decode(nil) == [])
+    }
+
+    /// (p) A Reconciler seeded via `init(keepConnected:)` from
+    /// `decode(["nord"])` -- simulating a relaunch that reads
+    /// keepConnectedTargets=["nord"] from UserDefaults -- proposes `.nord`
+    /// on the very first `actions(observing:now:)` call when Nord is
+    /// observed down, without any prior `setKeepConnected` call.
+    @Test func seededInitProducesActionOnFirstObservation() {
+        let r = Reconciler(keepConnected: Reconciler.decode(["nord"]))
+        let status = VPNStatus.parse("nord=down ts=Running web=ok streamy=ok")
+        #expect(r.actions(observing: status, now: Date()) == [.nord])
+    }
 }

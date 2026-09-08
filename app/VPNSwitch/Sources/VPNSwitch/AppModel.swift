@@ -59,6 +59,23 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(autoUpdateCheckEnabled, forKey: UpdateSchedule.autoCheckEnabledKey)
         }
     }
+    /// Master switch for the keep-connected reconciler (dns-config-l40):
+    /// when off, `reconciler.actions(observing:now:)` proposes nothing even
+    /// if targets are marked keep-connected. Persisted in UserDefaults;
+    /// default on, mirroring `notifyOnExternalChanges`'s pattern above.
+    /// Mirrors into `reconciler.enabled` on every change so the poll path
+    /// (dns-config-l40.3) never has to read UserDefaults itself.
+    @Published var keepVPNsConnected: Bool {
+        didSet {
+            UserDefaults.standard.set(keepVPNsConnected, forKey: Self.reconcileEnabledKey)
+            reconciler.enabled = keepVPNsConnected
+        }
+    }
+    /// The targets the user has asked to be kept connected, mirrored from
+    /// `reconciler.keepConnected` after every `setIntent(_:_:)` call so the
+    /// menu (dns-config-l40.4) can observe it without reaching into the
+    /// reconciler directly.
+    @Published private(set) var keptConnected: Set<VPNTarget> = []
     /// A newer version discovered by the background check (or by a manual
     /// "Check for Updates…" -- see note on `checkForUpdates()`), not yet
     /// dismissed via "Skip This Version" and not equal to a previously
@@ -68,6 +85,14 @@ final class AppModel: ObservableObject {
 
     static let pollIntervalKey = "pollIntervalSeconds"
     static let notifyKey = "notifyOnExternalChanges"
+    /// UserDefaults key for the persisted keep-connected target set (an
+    /// array of vpn-ctl.sh `cliName`s, see `Reconciler.encode`/`decode`).
+    /// `defaults write ie.boboco.vpnswitch keepConnectedTargets -array
+    /// nord tailscale`.
+    static let keepConnectedKey = "keepConnectedTargets"
+    /// UserDefaults key for the `keepVPNsConnected` master toggle.
+    /// `defaults write ie.boboco.vpnswitch keepVPNsConnected -bool NO`.
+    static let reconcileEnabledKey = "keepVPNsConnected"
     static let defaultPollInterval: TimeInterval = 5
     static let minPollInterval: TimeInterval = 2
     static let maxPollInterval: TimeInterval = 60
@@ -108,6 +133,12 @@ final class AppModel: ObservableObject {
     /// a counter/log").
     private(set) var lanDNSSyncCount = 0
 
+    /// The keep-connected policy engine (dns-config-l40). Unlike `queue`
+    /// below, its initializer takes no self-capturing closures, so it can be
+    /// given an initial value up front from decoded UserDefaults state
+    /// rather than being constructed in the second half of `init()`.
+    private(set) var reconciler: Reconciler
+
     /// The serial intent queue that owns all user-initiated vpn-ctl.sh
     /// mutations/refreshes (see the class doc comment). Declared as an
     /// implicitly-unwrapped optional and constructed in the second half of
@@ -134,6 +165,12 @@ final class AppModel: ObservableObject {
     init() {
         notifyOnExternalChanges = (UserDefaults.standard.object(forKey: Self.notifyKey) as? Bool) ?? true
         autoUpdateCheckEnabled = (UserDefaults.standard.object(forKey: UpdateSchedule.autoCheckEnabledKey) as? Bool) ?? true
+        let keepVPNsConnected = (UserDefaults.standard.object(forKey: Self.reconcileEnabledKey) as? Bool) ?? true
+        self.keepVPNsConnected = keepVPNsConnected
+        let decodedKeepConnected = Reconciler.decode(UserDefaults.standard.array(forKey: Self.keepConnectedKey) as? [String])
+        reconciler = Reconciler(keepConnected: decodedKeepConnected)
+        reconciler.enabled = keepVPNsConnected
+        keptConnected = decodedKeepConnected
         queue = ActionQueue(
             autoDrain: true,
             statusProvider: { [unowned self] in self.status },
@@ -256,13 +293,22 @@ final class AppModel: ObservableObject {
     /// opposite state is *actively running* is recorded as the next intent
     /// to run once the queue drains again.
     func toggleNord() {
-        queue.enqueue(.nord, status.nord.isOn ? .off : .on)
+        let target: DesiredState = status.nord.isOn ? .off : .on
+        // Record intent before enqueueing: the queue may drain immediately
+        // (nothing else in flight), and a reconciler consult during that
+        // drain must already see this target's new keep-connected intent.
+        setIntent(.nord, target)
+        queue.enqueue(.nord, target)
     }
 
     /// Toggles Tailscale to the opposite of its currently displayed state.
     /// See `toggleNord()` for the click-time/coalescing semantics.
     func toggleTailscale() {
-        queue.enqueue(.tailscale, status.ts.isOn ? .off : .on)
+        let target: DesiredState = status.ts.isOn ? .off : .on
+        // See toggleNord() -- intent must be recorded before the queue
+        // could possibly drain.
+        setIntent(.tailscale, target)
+        queue.enqueue(.tailscale, target)
     }
 
     /// Turns both NordVPN and Tailscale off via `vpn-ctl.sh all off` (or two
@@ -272,6 +318,10 @@ final class AppModel: ObservableObject {
     /// `all off` invocation when both are present in the pending map at the
     /// same drain snapshot (see `ActionQueue`).
     func turnAllOff() {
+        // See toggleNord() -- intent must be recorded before the queue
+        // could possibly drain. Both targets are turned off together.
+        setIntent(.nord, .off)
+        setIntent(.tailscale, .off)
         queue.enqueueAll(.off)
     }
 
@@ -279,13 +329,32 @@ final class AppModel: ObservableObject {
     /// separate `on` commands as needed). See `turnAllOff()` for why
     /// `enqueueAll` must be used instead of two `enqueue` calls.
     func turnAllOn() {
+        // See toggleNord() -- intent must be recorded before the queue
+        // could possibly drain. Both targets are turned on together.
+        setIntent(.nord, .on)
+        setIntent(.tailscale, .on)
         queue.enqueueAll(.on)
+    }
+
+    /// Records `target`'s keep-connected intent from a user on/off action
+    /// (dns-config-l40): updates `reconciler.keepConnected` and persists
+    /// the encoded set to UserDefaults, then mirrors the result into
+    /// `keptConnected` for observers. Must be called before the
+    /// corresponding `queue.enqueue`/`enqueueAll` call in each action
+    /// method below -- see the comment at each call site.
+    private func setIntent(_ target: VPNTarget, _ state: DesiredState) {
+        reconciler.setKeepConnected(target, state == .on)
+        UserDefaults.standard.set(Reconciler.encode(reconciler.keepConnected), forKey: Self.keepConnectedKey)
+        keptConnected = reconciler.keepConnected
     }
 
     /// Discards any not-yet-started queued intents (pending target states
     /// and/or a pending refresh) without touching a command already in
     /// flight. Used by Quit (dns-config-cr9.4) so quitting doesn't leave a
-    /// stale intent that would otherwise run on the next drain.
+    /// stale intent that would otherwise run on the next drain. Does NOT
+    /// touch keep-connected intent: a discarded click still expressed what
+    /// the user wants, so `reconciler.keepConnected`/`keptConnected` are
+    /// left as `setIntent` last set them.
     func discardPendingActions() {
         queue.discardPending()
     }

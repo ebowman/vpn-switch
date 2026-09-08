@@ -61,7 +61,22 @@ final class Reconciler {
 
     private var states: [VPNTarget: AttemptState] = [:]
 
-    init() {}
+    init(keepConnected: Set<VPNTarget> = []) {
+        self.keepConnected = keepConnected
+    }
+
+    /// Encodes `targets` as vpn-ctl.sh `cliName`s, sorted ascending, for
+    /// UserDefaults persistence.
+    static func encode(_ targets: Set<VPNTarget>) -> [String] {
+        targets.map(\.cliName).sorted()
+    }
+
+    /// Decodes a UserDefaults-stored array of `cliName`s back into a set of
+    /// targets. Unknown names are ignored; `nil` decodes to the empty set.
+    static func decode(_ raw: [String]?) -> Set<VPNTarget> {
+        guard let raw else { return [] }
+        return Set(raw.compactMap { name in VPNTarget.allCases.first { $0.cliName == name } })
+    }
 
     /// Read-only view of a target's current attempt/backoff/suspension state.
     func state(for target: VPNTarget) -> AttemptState {
