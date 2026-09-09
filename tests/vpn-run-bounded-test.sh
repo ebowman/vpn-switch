@@ -307,6 +307,85 @@ else
     cat "${SOURCE_BOTH_ERR}" >&2 2>/dev/null || true
 fi
 
+# ---------------------------------------------------------------------------
+# Case 8 (dns-config-du2): _vpn_run_bounded must return promptly even when
+# the CALLING shell has SIGTERM blocked/ignored -- exactly the situation
+# VPNCtl.swift's Task.detached worker threads were in pre-fix (Swift
+# concurrency / libdispatch worker threads run with SIGTERM blocked at the
+# pthread level, and posix_spawn children inherit that mask). Reproduced
+# here with `trap "" TERM` in a child bash: the watchdog subshell that
+# _vpn_run_bounded backgrounds is itself a job of that same shell, so it
+# also starts with SIGTERM ignored, meaning 'kill -TERM "$watchdog_pid";
+# wait "$watchdog_pid"' would never actually deliver/reap and the wait
+# sleeps for the watchdog's full remaining sleep (up to CASE8_TIMEOUT_SECS)
+# instead of returning immediately once the wrapped command (/bin/true)
+# has already exited. The fix (kill -KILL "$watchdog_pid" instead of
+# kill -TERM) cannot be blocked or ignored, so it returns promptly
+# regardless.
+#
+# Case 8a (self-check, tied to the REAL code): derive a broken copy of the
+# actual VPN_RUN_BOUNDED_LIB by sed-reverting the fix (kill -KILL
+# "${watchdog_pid}" -> kill -TERM "${watchdog_pid}") into SCRATCH_DIR (never
+# mutates the repo's real lib -- same approach as case 1a's BROKEN_LIB) and
+# confirm running case 8's scenario against THAT copy is slow (close to the
+# full timeout), proving this suite can detect the regression rather than
+# just exercising an already-fixed code path.
+# ---------------------------------------------------------------------------
+CASE8_TIMEOUT_SECS=8
+
+PRE_FIX_LIB="${SCRATCH_DIR}/$(basename "${VPN_RUN_BOUNDED_LIB}").pre-fix.sh"
+sed 's/kill -KILL "${watchdog_pid}" 2>\/dev\/null/kill -TERM "${watchdog_pid}" 2>\/dev\/null/' \
+    "${VPN_RUN_BOUNDED_LIB}" > "${PRE_FIX_LIB}"
+
+CASE8_DIFF_LINE_COUNT="$(diff "${VPN_RUN_BOUNDED_LIB}" "${PRE_FIX_LIB}" | grep -c '^[<>]' || true)"
+if [ "${CASE8_DIFF_LINE_COUNT}" -eq 2 ]; then
+    pass "(8a setup) sed-reverted pre-fix copy of ${VPN_RUN_BOUNDED_LIB} differs by exactly 1 changed line (diff line count=${CASE8_DIFF_LINE_COUNT})"
+else
+    fail "(8a setup) sed-reverted pre-fix copy of ${VPN_RUN_BOUNDED_LIB} differs by exactly 1 changed line (diff line count=${CASE8_DIFF_LINE_COUNT}, expected 2) -- the lib's watchdog-kill line shape may have changed"
+fi
+
+set +e
+start8a="$(now)"
+case8a_out="$(
+    bash -c '
+        set -uo pipefail
+        trap "" TERM
+        # shellcheck source=/dev/null
+        source "$1"
+        _vpn_run_bounded "$2" /usr/bin/true
+    ' _ "${PRE_FIX_LIB}" "${CASE8_TIMEOUT_SECS}"
+)"
+case8a_rc=$?
+set -e
+case8a_elapsed="$(elapsed_since "${start8a}")"
+echo "  (8a attempt) elapsed=${case8a_elapsed}s rc=${case8a_rc}"
+if [ "${case8a_rc}" -eq 0 ] && ge_threshold "${case8a_elapsed}" "$(awk -v t="${CASE8_TIMEOUT_SECS}" 'BEGIN{printf "%.3f", t*0.75}')"; then
+    pass "(8a self-check) pre-fix lib (kill -TERM on watchdog) with SIGTERM ignored in the parent takes close to the full ${CASE8_TIMEOUT_SECS}s timeout (${case8a_elapsed}s) -- proves this suite can detect the regression"
+else
+    fail "(8a self-check) pre-fix lib (kill -TERM on watchdog) with SIGTERM ignored in the parent takes close to the full ${CASE8_TIMEOUT_SECS}s timeout (got ${case8a_elapsed}s, rc=${case8a_rc}; expected elapsed >= 75% of timeout)"
+fi
+
+set +e
+start8="$(now)"
+case8_out="$(
+    bash -c '
+        set -uo pipefail
+        trap "" TERM
+        # shellcheck source=/dev/null
+        source "$1"
+        _vpn_run_bounded "$2" /usr/bin/true
+    ' _ "${VPN_RUN_BOUNDED_LIB}" "${CASE8_TIMEOUT_SECS}"
+)"
+case8_rc=$?
+set -e
+case8_elapsed="$(elapsed_since "${start8}")"
+echo "  (8 attempt) elapsed=${case8_elapsed}s rc=${case8_rc}"
+if [ "${case8_rc}" -eq 0 ] && le_threshold "${case8_elapsed}" "2"; then
+    pass "(8) _vpn_run_bounded returns well under 2s (${case8_elapsed}s) even with SIGTERM ignored in the parent shell (timeout=${CASE8_TIMEOUT_SECS}s)"
+else
+    fail "(8) _vpn_run_bounded returns well under 2s even with SIGTERM ignored in the parent shell (got ${case8_elapsed}s, rc=${case8_rc}, timeout=${CASE8_TIMEOUT_SECS}s)"
+fi
+
 echo ""
 echo "==================================================================="
 echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"

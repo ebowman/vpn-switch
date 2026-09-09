@@ -235,7 +235,32 @@ enum VPNCtl {
         // process-group leader, so kill(-pid, sig) below reaches it and any
         // grandchildren it spawns (they inherit its new pgid unless they
         // explicitly change it themselves).
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        //
+        // POSIX_SPAWN_SETSIGMASK / POSIX_SPAWN_SETSIGDEF (dns-config-du2):
+        // `run` is documented above to require being called off the main
+        // thread (Task.detached / a background DispatchQueue). Swift
+        // concurrency and libdispatch worker threads run with nearly every
+        // signal blocked at the pthread level (observed mask included
+        // SIGTERM), and posix_spawn children normally INHERIT the calling
+        // thread's signal mask -- so vpn-ctl.sh (and everything it in turn
+        // spawns) would start with SIGTERM blocked. lib/*.sh's
+        // _vpn_run_bounded watchdog relies on `kill -TERM $watchdog_pid;
+        // wait $watchdog_pid`; with TERM blocked, the signal is queued but
+        // never delivered, so the wait sleeps for the full watchdog timeout
+        // on every single bounded call (measured: 0.7s from a terminal vs.
+        // 20.5s with SIGTERM blocked in the parent -- see dns-config-du2).
+        // Passing an empty signal mask plus SIG_DFL for every signal here
+        // makes posix_spawn set the CHILD's mask/dispositions explicitly,
+        // overriding whatever the spawning thread had, so vpn-ctl.sh always
+        // starts with nothing blocked regardless of which thread called
+        // `run`.
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
+        posix_spawnattr_setsigmask(&attr, &emptyMask)
+        var defaultMask = sigset_t()
+        sigfillset(&defaultMask)
+        posix_spawnattr_setsigdefault(&attr, &defaultMask)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
 
         let argv: [String] = [path] + args
         var cArgs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }

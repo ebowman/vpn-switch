@@ -156,7 +156,19 @@ _vpn_run_bounded() {
 
     # Watchdog no longer needed: kill and reap it immediately so no stray
     # sleep (or held-open descriptor) lingers, whether or not it fired.
-    kill -TERM "${watchdog_pid}" 2>/dev/null
+    # Uses SIGKILL, not SIGTERM (dns-config-du2): when this whole library is
+    # sourced by a child spawned from a Swift concurrency / libdispatch
+    # worker thread (VPNCtl.run via Task.detached, pre-fix), SIGTERM is
+    # inherited as blocked, so 'kill -TERM "${watchdog_pid}"; wait
+    # "${watchdog_pid}"' below would never actually deliver the signal and
+    # the wait would sleep for the watchdog's full remaining sleep (up to
+    # the whole timeout) on every bounded call. The watchdog subshell's only
+    # job is `sleep "${secs}"` (plus a conditional kill -TERM of cmd_pid
+    # that already ran or is moot by this point), so SIGKILL -- which
+    # cannot be blocked, caught, or ignored -- is always safe here and
+    # guarantees this wait returns immediately regardless of the caller's
+    # signal mask.
+    kill -KILL "${watchdog_pid}" 2>/dev/null
     wait "${watchdog_pid}" 2>/dev/null
 
     if [ -e "${timed_out_flag}" ]; then
